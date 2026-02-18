@@ -1,0 +1,206 @@
+*&---------------------------------------------------------------------*
+*& REPORT Y_PM_READ_KOPFTEXT_MM
+*&---------------------------------------------------------------------*
+*& Kopf- und Posistiontexte aus MM-Kontrakten.
+*&
+*&
+*& Author     : ProjectNautilus
+*& date       : 10.09.2025
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*----------------------------------------------------------------------*
+* Änderungshistorie                                                    *
+* Datum      Benutzer:                  Grund                          *
+* ---------- ----------------- --------------------------------------- *
+*&---------------------------------------------------------------------*
+REPORT Y_PM_READ_KOPFTEXT_MM.
+
+TABLES: ekko.
+
+DATA: lt_text TYPE TABLE OF tline,
+      ls_text TYPE tline,
+      lv_name TYPE tdobname,
+      lv_id   TYPE tdid,
+      lv_index TYPE i.
+
+DATA: lt_ekpo TYPE TABLE OF ekpo,
+      ls_ekpo TYPE ekpo.
+
+DATA: lt_ekko TYPE TABLE OF ekko,
+      ls_ekko TYPE ekko.
+
+* Checkbox für Positionstexte (Standard: gesetzt)
+PARAMETERS: p_pos AS CHECKBOX DEFAULT 'X'.
+
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
+SELECT-OPTIONS: s_ebeln FOR ekko-ebeln.
+SELECTION-SCREEN END OF BLOCK b1.
+
+* Hilfstabelle für die Benennung der Text-IDs
+DATA: BEGIN OF lt_id_names OCCURS 0,
+        id   TYPE tdid,
+        name TYPE string,
+      END OF lt_id_names.
+
+* Präfix-Tabelle für K und L
+DATA: lt_prefix TYPE TABLE OF char1,
+      lv_prefix TYPE char1.
+
+INITIALIZATION.
+  " K-IDs und L-IDs mit gleichem Namen anlegen
+  APPEND VALUE #( id = 'K00' name = 'Abruftext' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L00' name = 'Abruftext' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K01' name = 'Kopftext' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L01' name = 'Kopftext' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K02' name = 'Kopfnotiz' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L02' name = 'Kopfnotiz' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K03' name = 'Preisarten' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L03' name = 'Preisarten' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K04' name = 'Termine' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L04' name = 'Termine' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K05' name = 'Lieferbedingungen' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L05' name = 'Lieferbedingungen' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K06' name = 'Versandvorschrift' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L06' name = 'Versandvorschrift' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K07' name = 'Zahlungsbedingungen' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L07' name = 'Zahlungsbedingungen' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K08' name = 'Gewährleistungen' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L08' name = 'Gewährleistungen' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K09' name = 'Vertragsstrafen' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L09' name = 'Vertragsstrafen' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K10' name = 'Garantien' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L10' name = 'Garantien' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K11' name = 'Nebenabreden' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L11' name = 'Nebenabreden' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K12' name = 'Anlage' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L12' name = 'Anlage' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K13' name = 'Sonstige Vereinbarungen' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L13' name = 'Sonstige Vereinbarungen' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K14' name = 'Anlieferung' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L14' name = 'Anlieferung' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K15' name = 'Lieferantennotiz (allgemein)' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L15' name = 'Lieferantennotiz (allgemein)' ) TO lt_id_names.
+  APPEND VALUE #( id = 'K16' name = 'Lieferantennotiz (Ekorg)' ) TO lt_id_names.
+  APPEND VALUE #( id = 'L16' name = 'Lieferantennotiz (Ekorg)' ) TO lt_id_names.
+
+  lt_prefix = VALUE #( ( 'K' ) ( 'L' ) ).
+
+START-OF-SELECTION.
+
+  IF s_ebeln[] IS INITIAL.
+    WRITE: / 'Bitte geben Sie Kontraktnummern an.'.
+    RETURN.
+  ENDIF.
+
+  SELECT * INTO TABLE lt_ekko
+    FROM ekko
+    WHERE ebeln IN s_ebeln
+    ORDER BY ebeln.
+
+  IF lt_ekko IS INITIAL.
+    WRITE: / 'Keine Kontrakte gefunden.'.
+    RETURN.
+  ENDIF.
+
+  LOOP AT lt_ekko INTO ls_ekko.
+    WRITE: / '============================================='.
+    WRITE: / 'Kontrakt:', ls_ekko-ebeln.
+    WRITE: / '============================================='.
+    WRITE: / '--- Kopftexte ---'.
+
+    lv_name = ls_ekko-ebeln.
+
+    DO 17 TIMES.
+      lv_index = sy-index - 1.
+      LOOP AT lt_prefix INTO lv_prefix.
+        IF lv_index < 10.
+          lv_id = |{ lv_prefix }0{ lv_index }|.
+        ELSE.
+          lv_id = |{ lv_prefix }{ lv_index }|.
+        ENDIF.
+
+        CLEAR lt_text.
+        CALL FUNCTION 'READ_TEXT'
+          EXPORTING
+            id = lv_id
+            language = 'D'
+            name = lv_name
+            object = 'EKKO'
+          TABLES
+            lines = lt_text
+          EXCEPTIONS
+            not_found = 1
+            OTHERS = 2.
+
+        IF sy-subrc = 0 AND lt_text IS NOT INITIAL.
+          READ TABLE lt_id_names WITH KEY id = lv_id.
+          IF sy-subrc = 0.
+            WRITE: / 'Text-ID:', lv_id, '(', lt_id_names-name, ')'.
+          ELSE.
+            WRITE: / 'Text-ID:', lv_id.
+          ENDIF.
+          LOOP AT lt_text INTO ls_text.
+            WRITE: / ls_text-tdline.
+          ENDLOOP.
+          WRITE: / '-----------------------------'.
+        ENDIF.
+      ENDLOOP.
+    ENDDO.
+
+    IF p_pos = 'X'.
+      WRITE: / '--- Positionstexte ---'.
+      SELECT * INTO TABLE lt_ekpo
+        FROM ekpo
+        WHERE ebeln = ls_ekko-ebeln.
+
+      IF lt_ekpo IS INITIAL.
+        WRITE: / 'Keine Positionen gefunden für Kontrakt', ls_ekko-ebeln.
+        WRITE: /.
+        CONTINUE.
+      ENDIF.
+
+      LOOP AT lt_ekpo INTO ls_ekpo.
+        lv_name = ls_ekpo-ebeln && ls_ekpo-ebelp.
+        DO 17 TIMES.
+          lv_index = sy-index - 1.
+          LOOP AT lt_prefix INTO lv_prefix.
+            IF lv_index < 10.
+              lv_id = |{ lv_prefix }0{ lv_index }|.
+            ELSE.
+              lv_id = |{ lv_prefix }{ lv_index }|.
+            ENDIF.
+
+            CLEAR lt_text.
+            CALL FUNCTION 'READ_TEXT'
+              EXPORTING
+                id = lv_id
+                language = 'D'
+                name = lv_name
+                object = 'EKPO'
+              TABLES
+                lines = lt_text
+              EXCEPTIONS
+                not_found = 1
+                OTHERS = 2.
+
+            IF sy-subrc = 0 AND lt_text IS NOT INITIAL.
+              READ TABLE lt_id_names WITH KEY id = lv_id.
+              IF sy-subrc = 0.
+                WRITE: / 'Position:', ls_ekpo-ebelp, 'Text-ID:', lv_id, '(', lt_id_names-name, ')'.
+              ELSE.
+                WRITE: / 'Position:', ls_ekpo-ebelp, 'Text-ID:', lv_id.
+              ENDIF.
+              LOOP AT lt_text INTO ls_text.
+                WRITE: / ls_text-tdline.
+              ENDLOOP.
+              WRITE: / '-----------------------------'.
+            ENDIF.
+          ENDLOOP.
+        ENDDO.
+      ENDLOOP.
+    ENDIF.
+
+    WRITE: /.
+    WRITE: /.
+  ENDLOOP.
