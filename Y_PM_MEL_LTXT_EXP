@@ -5,7 +5,7 @@
 *& Langtexte aus Störungsmeldungen (QMEL) für definierten Zeitraum.
 *& Export als *.csv. !Dateipfad muss in SAP definiert sein!
 *&
-*& Author     : 
+*& Author     : ProjectNautilus
 *& date       : [07.06.2025]
 *& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
 *&              Sonstiges/others  ( )                  Modulpool   ( )
