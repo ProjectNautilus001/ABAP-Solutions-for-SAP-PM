@@ -1,0 +1,129 @@
+*&---------------------------------------------------------------------*
+*&
+*& 88888888ba   88b           d88     ,a8888a,             ,d8        ad88888ba
+*& 88      "8b  888b         d888   ,8P"'  `"Y8,         ,d888       d8"     "8b
+*& 88      ,8P  88`8b       d8'88  ,8P        Y8,      ,d8" 88       Y8,
+*& 88aaaaaa8P'  88 `8b     d8' 88  88          88    ,d8"   88       `Y8aaaaa,    8b,dPPYba,    ,adPPYba,  8b,dPPYba,  8b,dPPYba,   ,adPPYba,  8b,dPPYba,
+*& 88""""""'    88  `8b   d8'  88  88          88  ,d8"     88         `"""""8b,  88P'    "8a  a8P_____88  88P'   "Y8  88P'   "Y8  a8P_____88  88P'   `"8a
+*& 88           88   `8b d8'   88  `8b        d8'  8888888888888             `8b  88       d8  8PP"""""""  88          88          8PP"""""""  88       88
+*& 88           88    `888'    88   `8ba,  ,ad8'            88       Y8a     a8P  88b,   ,a8"  "8b,   ,aa  88          88          "8b,   ,aa  88       88
+*& 88           88     `8'     88     "Y8888P"              88        "Y88888P"   88`YbbdP"'    `"Ybbd8"'  88          88           `"Ybbd8"'  88       88
+*&                                                                                88
+*&                                                                                88
+*&---------------------------------------------------------------------*
+*& Sperrt oder entsperrt Aufträge über Systemstatus SPER
+*& für Jahresabschluss PM
+*& L = Sperren, U = Entsperren
+*&---------------------------------------------------------------------*
+*&
+*&
+*& Author     : Student, Christian
+*& date       : 18.11.2025
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*----------------------------------------------------------------------*
+* Änderungshistorie                                                    *
+* Datum      Benutzer:                  Grund                          *
+* ---------- ----------------- --------------------------------------- *
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+
+REPORT y_pm_04_lock_unlock.
+
+TABLES: aufk.
+
+PARAMETERS: p_action TYPE c OBLIGATORY DEFAULT 'L'.
+SELECT-OPTIONS: s_aufnr FOR aufk-aufnr.
+
+START-OF-SELECTION.
+
+  DATA: lt_orders     TYPE TABLE OF aufk,
+        ls_order      TYPE aufk,
+        lv_processed  TYPE i,
+        lv_errors     TYPE i,
+        lt_statuschg  TYPE TABLE OF jstat,
+        ls_statuschg  TYPE jstat,
+        lt_status     TYPE TABLE OF jest,
+        ls_status     TYPE jest.
+
+  " PM04-Aufträge selektieren
+  IF s_aufnr[] IS INITIAL.
+    SELECT * FROM aufk INTO TABLE lt_orders WHERE auart = 'PM04'.
+  ELSE.
+    SELECT * FROM aufk INTO TABLE lt_orders WHERE auart = 'PM04' AND aufnr IN s_aufnr.
+  ENDIF.
+
+  IF lt_orders IS INITIAL.
+    WRITE: / 'Keine PM04-Aufträge gefunden.'.
+    RETURN.
+  ENDIF.
+
+  WRITE: / 'Gefundene Aufträge:', lines( lt_orders ).
+  SKIP.
+
+  LOOP AT lt_orders INTO ls_order.
+
+    " Debug: Aktuellen Status lesen
+    CALL FUNCTION 'STATUS_READ'
+      EXPORTING
+        objnr = ls_order-objnr
+      TABLES
+        status = lt_status.
+
+    WRITE: / 'DEBUG: Auftrag', ls_order-aufnr, 'OBJNR:', ls_order-objnr.
+    WRITE: / 'Aktive Status: '.
+    LOOP AT lt_status INTO ls_status WHERE inact = space.
+      WRITE: / ls_status-stat.
+    ENDLOOP.
+
+    " Statusänderung vorbereiten
+    CLEAR lt_statuschg.
+
+    IF p_action = 'L'. " Sperren
+      ls_statuschg-stat  = 'I0043'. " SPER
+      ls_statuschg-inact = space.   " aktiv setzen
+      APPEND ls_statuschg TO lt_statuschg.
+    ELSEIF p_action = 'U'. " Entsperren
+      ls_statuschg-stat  = 'I0043'. " SPER
+      ls_statuschg-inact = 'X'.     " inaktiv setzen
+      APPEND ls_statuschg TO lt_statuschg.
+    ENDIF.
+
+    " Statusänderung ausführen
+    CALL FUNCTION 'STATUS_CHANGE_INTERN'
+      EXPORTING
+        objnr       = ls_order-objnr
+        set_chgkz   = 'X'
+      TABLES
+        status      = lt_statuschg
+      EXCEPTIONS
+        object_not_found    = 1
+        status_inconsistent = 2
+        status_not_allowed  = 3
+        OTHERS              = 4.
+
+    CASE sy-subrc.
+      WHEN 0.
+        COMMIT WORK.
+        IF p_action = 'L'.
+          WRITE: / 'SPER gesetzt für Auftrag', ls_order-aufnr.
+        ELSE.
+          WRITE: / 'SPER entfernt für Auftrag', ls_order-aufnr.
+        ENDIF.
+        lv_processed = lv_processed + 1.
+      WHEN 3.
+        WRITE: / 'Fehler: Statusänderung nicht erlaubt für Auftrag', ls_order-aufnr.
+        lv_errors = lv_errors + 1.
+      WHEN OTHERS.
+        WRITE: / 'Fehler bei Auftrag', ls_order-aufnr, '(Subrc:', sy-subrc, ')'.
+        lv_errors = lv_errors + 1.
+    ENDCASE.
+
+    SKIP.
+  ENDLOOP.
+
+  SKIP.
+  WRITE: / 'Zusammenfassung:'.
+  WRITE: / 'Erfolgreich geändert:', lv_processed.
+  WRITE: / 'Fehler:', lv_errors.
