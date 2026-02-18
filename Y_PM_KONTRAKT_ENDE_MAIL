@@ -1,0 +1,713 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_KONTRAKT_ENDE_MAIL
+*&---------------------------------------------------------------------*
+*& Batchfähiger Report zur Laufzeitprüfung MM-Kontrakte.
+*& Erweiterung: Vergleich mit Positionsgültigkeiten aus YTPOPRESET_TS.
+*& Mailversand möglich.
+*&
+*& Author : 
+*& date   : 22.01.2026
+*& kind of p. : Report (x) Batch-Input ( ) Include ( )
+*& Sonstiges/others ( ) Modulpool ( )
+*&---------------------------------------------------------------------*
+*& Änderungshistorie
+*& Datum     Benutzer   Grund
+*& 30.01.2026 Student   Erweiterung: Positionsgültigkeiten (MAX(BIS) je EBELN/EBELP) aus YTPOPRESET_TS
+*& 03.02.2026 Student   Anpassung List-u.Mailausgabe, Lesbarkeit verbessert.
+*---------------------------------------------------------------------*
+REPORT y_pm_kontrakt_ende_mail NO STANDARD PAGE HEADING.
+
+TABLES: ekko, lfa1.
+
+*---------------------------------------------------------------------*
+* Selektion
+*---------------------------------------------------------------------*
+SELECT-OPTIONS: s_ebeln FOR ekko-ebeln.
+PARAMETERS: p_vorl  TYPE i DEFAULT 90 OBLIGATORY,
+            p_inclp AS CHECKBOX DEFAULT ' ',
+            p_past  TYPE i DEFAULT 30,
+            p_email TYPE ad_smtpadr LOWER CASE,
+            p_send  AS CHECKBOX DEFAULT ' ',
+            p_pos   AS CHECKBOX DEFAULT 'X'.
+
+*---------------------------------------------------------------------*
+* Typen / Daten
+*---------------------------------------------------------------------*
+TYPES: BEGIN OF ty_out,
+         ebeln    TYPE ekko-ebeln,
+         lifnr    TYPE ekko-lifnr,
+         name1    TYPE lfa1-name1,
+         kdate    TYPE ekko-kdate,
+         resttage TYPE i,
+         status   TYPE char12,
+       END OF ty_out.
+DATA: gt_out TYPE STANDARD TABLE OF ty_out,
+      gs_out TYPE ty_out,
+      gv_today TYPE sy-datum.
+
+TYPES: BEGIN OF ty_pos_agg,
+         ebeln TYPE ekko-ebeln,
+         ebelp TYPE ekpo-ebelp,
+         bis   LIKE ytpopreset_ts-bis,
+       END OF ty_pos_agg.
+TYPES: BEGIN OF ty_pos_out,
+         ebeln      TYPE ekko-ebeln,
+         ebelp      TYPE ekpo-ebelp,
+         kdate      TYPE ekko-kdate,
+         pos_bis    LIKE ytpopreset_ts-bis,
+         resttage   TYPE i,
+         status     TYPE char12,
+         delta_days TYPE i,
+       END OF ty_pos_out.
+TYPES: BEGIN OF ty_dev,
+         ebeln   TYPE ekko-ebeln,
+         kdate   TYPE ekko-kdate,
+         cnt_pos TYPE i,
+         cnt_dev TYPE i,
+       END OF ty_dev.
+DATA: gt_pos_agg TYPE STANDARD TABLE OF ty_pos_agg WITH DEFAULT KEY,
+      gt_pos_out TYPE STANDARD TABLE OF ty_pos_out WITH DEFAULT KEY,
+      gt_dev     TYPE STANDARD TABLE OF ty_dev     WITH DEFAULT KEY.
+
+*---------------------------------------------------------------------*
+* Selektion: Rückblick nur aktiv wenn = 'X'
+*---------------------------------------------------------------------*
+AT SELECTION-SCREEN OUTPUT.
+  PERFORM adjust_screen.
+AT SELECTION-SCREEN.
+  PERFORM validate_selection.
+
+*---------------------------------------------------------------------*
+* Start
+*---------------------------------------------------------------------*
+START-OF-SELECTION.
+  gv_today = sy-datum.
+  PERFORM get_data.
+  PERFORM write_list.
+  DATA: lv_lines TYPE i.
+  DESCRIBE TABLE gt_out LINES lv_lines.
+  IF p_send = 'X' AND p_email IS NOT INITIAL AND lv_lines > 0.
+    PERFORM send_email_kontrakt USING p_email gt_out.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* Screen-Logik
+*---------------------------------------------------------------------*
+FORM adjust_screen.
+  LOOP AT SCREEN.
+    IF screen-name = 'P_PAST'.
+      IF p_inclp = 'X'.
+        screen-input = '1'.
+      ELSE.
+        screen-input = '0'.
+      ENDIF.
+      MODIFY SCREEN.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.
+
+FORM validate_selection.
+  IF p_vorl < 0.
+    MESSAGE 'Vorlauf darf nicht negativ sein.' TYPE 'E'.
+  ENDIF.
+  IF p_inclp = 'X' AND p_past < 0.
+    MESSAGE 'Vergangenheitstage (P_PAST) dürfen nicht negativ sein.' TYPE 'E'.
+  ENDIF.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Resttage
+*---------------------------------------------------------------------*
+FORM format_resttage USING    iv_days TYPE i
+                     CHANGING cv_text TYPE char10.
+  DATA: lv_abs_i TYPE i,
+        lv_abs_c TYPE char10.
+  CLEAR: cv_text, lv_abs_i, lv_abs_c.
+  lv_abs_i = iv_days.
+  IF lv_abs_i < 0.
+    lv_abs_i = lv_abs_i * -1.
+  ENDIF.
+  WRITE lv_abs_i TO lv_abs_c.
+  SHIFT lv_abs_c LEFT DELETING LEADING space.
+  IF iv_days < 0.
+    CONCATENATE '-' lv_abs_c INTO cv_text.
+  ELSE.
+    cv_text = lv_abs_c.
+  ENDIF.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Daten lesen & aufbereiten
+*---------------------------------------------------------------------*
+FORM get_data.
+  DATA: lt_ekko TYPE STANDARD TABLE OF ekko,
+        ls_ekko TYPE ekko,
+        lv_days TYPE i,
+        lv_min  TYPE i.
+  TYPES: BEGIN OF ty_lif,
+           lifnr TYPE lfa1-lifnr,
+           name1 TYPE lfa1-name1,
+         END OF ty_lif.
+  DATA: lt_lif   TYPE SORTED TABLE OF ty_lif WITH UNIQUE KEY lifnr,
+        ls_lif   TYPE ty_lif,
+        lt_lifnr TYPE SORTED TABLE OF lfa1-lifnr WITH UNIQUE KEY table_line,
+        lv_lifnr TYPE lfa1-lifnr.
+
+  REFRESH: gt_out, gt_pos_agg, gt_pos_out, gt_dev.
+
+  IF s_ebeln[] IS INITIAL.
+    WRITE: / 'Keine Kontraktnummern selektiert.'.
+    RETURN.
+  ENDIF.
+
+  lv_min = 0.
+  IF p_inclp = 'X'.
+    lv_min = 0 - p_past.
+  ENDIF.
+
+  SELECT ebeln lifnr kdate loekz
+    FROM ekko
+    INTO CORRESPONDING FIELDS OF TABLE lt_ekko
+    WHERE ebeln IN s_ebeln
+      AND loekz = space
+      AND bukrs = '60'.
+  IF sy-subrc <> 0 OR lt_ekko[] IS INITIAL.
+    WRITE: / 'Keine Kontrakte gefunden.'.
+    RETURN.
+  ENDIF.
+
+  REFRESH lt_lifnr.
+  LOOP AT lt_ekko INTO ls_ekko.
+    IF ls_ekko-lifnr IS NOT INITIAL.
+      lv_lifnr = ls_ekko-lifnr.
+      INSERT lv_lifnr INTO TABLE lt_lifnr.
+    ENDIF.
+  ENDLOOP.
+
+  IF lt_lifnr[] IS NOT INITIAL.
+    SELECT lifnr name1
+      FROM lfa1
+      INTO TABLE lt_lif
+      FOR ALL ENTRIES IN lt_lifnr
+      WHERE lifnr = lt_lifnr-table_line.
+  ENDIF.
+
+  LOOP AT lt_ekko INTO ls_ekko.
+    IF ls_ekko-kdate IS INITIAL.
+      CONTINUE.
+    ENDIF.
+    lv_days = ls_ekko-kdate - gv_today.
+    IF lv_days < lv_min OR lv_days > p_vorl.
+      CONTINUE.
+    ENDIF.
+    CLEAR gs_out.
+    gs_out-ebeln    = ls_ekko-ebeln.
+    gs_out-lifnr    = ls_ekko-lifnr.
+    gs_out-kdate    = ls_ekko-kdate.
+    gs_out-resttage = lv_days.
+    READ TABLE lt_lif INTO ls_lif WITH KEY lifnr = ls_ekko-lifnr.
+    IF sy-subrc = 0.
+      gs_out-name1 = ls_lif-name1.
+    ENDIF.
+    gs_out-status = COND char12( WHEN lv_days < 0 THEN 'ABGELAUFEN' ELSE 'AUSLAUFEND' ).
+    APPEND gs_out TO gt_out.
+  ENDLOOP.
+
+  IF p_pos = 'X'.
+    SELECT ebeln ebelp MAX( bis ) AS bis
+      FROM ytpopreset_ts
+      INTO TABLE gt_pos_agg
+      WHERE ebeln IN s_ebeln
+        AND ekorg = '60'
+      GROUP BY ebeln ebelp.
+
+    SORT gt_pos_agg BY ebeln ebelp.
+
+    DATA: ls_posa   TYPE ty_pos_agg,
+          ls_pos_out TYPE ty_pos_out,
+          ls_dev    TYPE ty_dev,
+          lv_days_p TYPE i,
+          lv_min_w  TYPE i,
+          lv_first  TYPE sy-tabix,
+          lv_idx    TYPE sy-tabix,
+          lv_cntp   TYPE i,
+          lv_cntdev TYPE i.
+
+    lv_min_w = 0.
+    IF p_inclp = 'X'.
+      lv_min_w = 0 - p_past.
+    ENDIF.
+
+    LOOP AT lt_ekko INTO ls_ekko.
+      CLEAR: lv_cntp, lv_cntdev.
+
+      READ TABLE gt_pos_agg WITH KEY ebeln = ls_ekko-ebeln TRANSPORTING NO FIELDS BINARY SEARCH.
+      IF sy-subrc <> 0.
+        CLEAR ls_dev.
+        ls_dev-ebeln   = ls_ekko-ebeln.
+        ls_dev-kdate   = ls_ekko-kdate.
+        ls_dev-cnt_pos = 0.
+        ls_dev-cnt_dev = 0.
+        APPEND ls_dev TO gt_dev.
+        CONTINUE.
+      ENDIF.
+
+      lv_first = sy-tabix.
+      WHILE lv_first > 1.
+        READ TABLE gt_pos_agg INDEX lv_first - 1 INTO ls_posa.
+        IF sy-subrc <> 0 OR ls_posa-ebeln <> ls_ekko-ebeln.
+          EXIT.
+        ENDIF.
+        lv_first = lv_first - 1.
+      ENDWHILE.
+
+      lv_idx = lv_first.
+      DO.
+        READ TABLE gt_pos_agg INDEX lv_idx INTO ls_posa.
+        IF sy-subrc <> 0 OR ls_posa-ebeln <> ls_ekko-ebeln.
+          EXIT.
+        ENDIF.
+        lv_cntp = lv_cntp + 1.
+        DATA(lv_delta) = ls_posa-bis - ls_ekko-kdate.
+        IF lv_delta <> 0.
+          lv_cntdev = lv_cntdev + 1.
+        ENDIF.
+        lv_days_p = ls_posa-bis - gv_today.
+        IF lv_days_p >= lv_min_w AND lv_days_p <= p_vorl AND lv_delta <> 0.
+          CLEAR ls_pos_out.
+          ls_pos_out-ebeln     = ls_ekko-ebeln.
+          ls_pos_out-ebelp     = ls_posa-ebelp.
+          ls_pos_out-kdate     = ls_ekko-kdate.
+          ls_pos_out-pos_bis   = ls_posa-bis.
+          ls_pos_out-resttage  = lv_days_p.
+          ls_pos_out-delta_days = lv_delta.
+          ls_pos_out-status    = COND char12( WHEN lv_days_p < 0 THEN 'ABGELAUFEN' ELSE 'AUSLAUFEND' ).
+          APPEND ls_pos_out TO gt_pos_out.
+        ENDIF.
+        lv_idx = lv_idx + 1.
+      ENDDO.
+
+      CLEAR ls_dev.
+      ls_dev-ebeln   = ls_ekko-ebeln.
+      ls_dev-kdate   = ls_ekko-kdate.
+      ls_dev-cnt_pos = lv_cntp.
+      ls_dev-cnt_dev = lv_cntdev.
+      APPEND ls_dev TO gt_dev.
+    ENDLOOP.
+
+    DELETE gt_pos_out WHERE delta_days = 0.
+  ENDIF.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Liste nur wenn Treffer
+*---------------------------------------------------------------------*
+FORM write_list.
+  DATA: lv_cnt_all TYPE i,
+        lv_cnt_exp TYPE i,
+        lv_cnt_run TYPE i.
+  DATA: lt_abgelaufen TYPE STANDARD TABLE OF ty_out,
+        lt_auslaufend TYPE STANDARD TABLE OF ty_out.
+  DATA: lv_rest_disp TYPE char10.
+
+  REFRESH: lt_abgelaufen, lt_auslaufend.
+  LOOP AT gt_out INTO gs_out.
+    IF gs_out-resttage < 0.
+      APPEND gs_out TO lt_abgelaufen.
+    ELSE.
+      APPEND gs_out TO lt_auslaufend.
+    ENDIF.
+  ENDLOOP.
+
+  DESCRIBE TABLE gt_out LINES lv_cnt_all.
+  DESCRIBE TABLE lt_abgelaufen LINES lv_cnt_exp.
+  DESCRIBE TABLE lt_auslaufend LINES lv_cnt_run.
+
+  WRITE: / 'Kontrakt-Laufzeitprüfung BUKRS 60 Datum:', gv_today.
+  WRITE: / 'Vorlauf (Tage):', p_vorl.
+  IF p_inclp = 'X'.
+    WRITE: / 'Vergangenheit aktiv: JA (Tage):', p_past.
+  ELSE.
+    WRITE: / 'Vergangenheit aktiv: NEIN'.
+  ENDIF.
+  IF p_pos = 'X'.
+    WRITE: / 'Positionsprüfung: JA (Quelle: Findungstabelle YTPOPRESET_TS)'.
+  ELSE.
+    WRITE: / 'Positionsprüfung: NEIN'.
+  ENDIF.
+
+  "ULINE.
+
+  IF lv_cnt_all > 0.
+    WRITE: / 'Treffer gesamt:', lv_cnt_all,
+            ' Auslaufend:', lv_cnt_run,
+            ' Abgelaufen:', lv_cnt_exp.
+
+    ULINE AT /(98).
+
+    SKIP 2.
+
+    FORMAT COLOR COL_KEY INTENSIFIED ON.
+    WRITE: / 'AUSLAUFEND IN DEN NÄCHSTEN',p_vorl,'TAGEN'.
+    FORMAT RESET.
+    "ULINE AT /(12).
+
+    WRITE: / 'KONTRAKT', 14 'LIEFERANT', 58 'STATUS', 71 'GÜLTIG BIS', 90 'RESTTAGE'.
+    ULINE AT /(98).
+    IF lt_auslaufend[] IS INITIAL.
+      WRITE: / 'Keine auslaufenden Kontrakte im Fenster gefunden.'.
+    ELSE.
+      SORT lt_auslaufend BY resttage ASCENDING ebeln ASCENDING.
+      LOOP AT lt_auslaufend INTO gs_out.
+        CLEAR lv_rest_disp.
+        PERFORM format_resttage USING gs_out-resttage CHANGING lv_rest_disp.
+        WRITE: / gs_out-ebeln  UNDER 'KONTRAKT',
+                 gs_out-name1  UNDER 'LIEFERANT',
+                 gs_out-status UNDER 'STATUS',
+                 gs_out-kdate  UNDER 'GÜLTIG BIS',
+                 lv_rest_disp  UNDER 'RESTTAGE'.
+      ENDLOOP.
+    ENDIF.
+
+    ULINE AT /(98).
+
+    SKIP 2.
+
+    WRITE: / 'ABGELAUFEN (Resttage < 0):' COLOR COL_KEY INTENSIFIED ON.
+    FORMAT RESET.
+    "ULINE AT /(25).
+    WRITE: / 'KONTRAKT', 14 'LIEFERANT', 58 'STATUS', 71 'GÜLTIG BIS', 90 'RESTTAGE'.
+    ULINE AT /(98).
+    IF p_inclp <> 'X'.
+      WRITE: / 'Vergangenheit ist nicht aktiviert (Haken P_INCLP).'.
+    ELSEIF lt_abgelaufen[] IS INITIAL.
+      WRITE: / 'Keine abgelaufenen Kontrakte im Vergangenheitsfenster gefunden.'.
+    ELSE.
+      SORT lt_abgelaufen BY resttage ASCENDING ebeln ASCENDING.
+      LOOP AT lt_abgelaufen INTO gs_out.
+        CLEAR lv_rest_disp.
+        PERFORM format_resttage USING gs_out-resttage CHANGING lv_rest_disp.
+        WRITE: / gs_out-ebeln  UNDER 'KONTRAKT',
+                 gs_out-name1  UNDER 'LIEFERANT',
+                 gs_out-status UNDER 'STATUS',
+                 gs_out-kdate  UNDER 'GÜLTIG BIS',
+                 lv_rest_disp  UNDER 'RESTTAGE'.
+      ENDLOOP.
+    ENDIF.
+  ENDIF.
+
+  DATA: ls_dev_disp TYPE ty_dev,
+        lv_any_dev  TYPE abap_bool.
+  lv_any_dev = abap_false.
+  LOOP AT gt_dev INTO ls_dev_disp WHERE cnt_dev > 0.
+    lv_any_dev = abap_true.
+    EXIT.
+  ENDLOOP.
+
+  IF p_pos = 'X' AND lv_any_dev = abap_true.
+
+    "ULINE.
+
+    SKIP 2.
+
+    WRITE: / 'POSITIONSABWEICHUNGEN IN DER FINDUNGSTABELLE:' COLOR COL_KEY INTENSIFIED ON.
+    FORMAT RESET.
+    "ULINE AT /(45).
+
+
+    WRITE: / 'KONTRAKT',
+             14 'POS',
+             20 'LIEFERANT',
+             66 'KONTR.-BIS',
+             78 'POS-BIS',
+             90 'STATUS',
+            103 'RESTTAGE'.
+    ULINE AT /(111).
+
+    IF gt_pos_out[] IS INITIAL.
+      WRITE: / 'Keine Positionsabweichungen im Vorlauf/Vergangenheitsfenster.'.
+    ELSE.
+      DATA: ls_pos_out TYPE ty_pos_out,
+            lv_k_c     TYPE char10,
+            lv_p_c     TYPE char10,
+            lv_r_c     TYPE char10.
+      SORT gt_pos_out BY ebeln ASCENDING ebelp ASCENDING resttage ASCENDING.
+      LOOP AT gt_pos_out INTO ls_pos_out.
+        CLEAR: lv_k_c, lv_p_c, lv_r_c.
+        WRITE ls_pos_out-kdate   TO lv_k_c.
+        WRITE ls_pos_out-pos_bis TO lv_p_c.
+        PERFORM format_resttage USING ls_pos_out-resttage CHANGING lv_r_c.
+
+        " Lieferant zur EBELN holen (aus bereits aufgebautem gt_out)
+        READ TABLE gt_out INTO gs_out WITH KEY ebeln = ls_pos_out-ebeln.
+
+        " Ausgabe mit LIEFERANT zwischen POS und KONTR.-BIS
+        WRITE: / ls_pos_out-ebeln  UNDER 'KONTRAKT',
+                 ls_pos_out-ebelp  UNDER 'POS',
+                 gs_out-name1      UNDER 'LIEFERANT',
+                 lv_k_c            UNDER 'KONTR.-BIS',
+                 lv_p_c            UNDER 'POS-BIS',
+                 90 ls_pos_out-status,
+                103 lv_r_c.
+      ENDLOOP.
+    ENDIF.
+  ENDIF.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Mailversand – nur wenn Treffer
+*---------------------------------------------------------------------*
+FORM send_email_kontrakt USING pv_email TYPE ad_smtpadr
+                               pt_data  TYPE STANDARD TABLE.
+
+  DATA: lt_mail_body TYPE soli_tab,
+        ls_mail_line TYPE soli,
+        lv_subject   TYPE so_obj_des,
+        lv_line      TYPE string.
+
+  DATA: lv_kdate_c TYPE char10,
+        lv_rest_c  TYPE char10,
+        lv_past_c  TYPE char10,
+        lv_vorl_c  TYPE char10,
+        lv_today_c TYPE char10.
+
+  DATA: lv_cnt_all TYPE i,
+        lv_cnt_exp TYPE i,
+        lv_cnt_run TYPE i.
+
+  DATA: lt_abgelaufen TYPE STANDARD TABLE OF ty_out,
+        lt_auslaufend TYPE STANDARD TABLE OF ty_out,
+        ls_out        TYPE ty_out.
+
+  DATA: lo_send_request TYPE REF TO cl_bcs,
+        lo_document     TYPE REF TO cl_document_bcs,
+        lx_bcs          TYPE REF TO cx_bcs.
+
+  DATA: lv_row TYPE c LENGTH 180.
+
+
+  CONSTANTS: c_sep TYPE c LENGTH 120 VALUE
+    '------------------------------------------------------------------------------------------------------------'.
+  DATA: lv_sep98  TYPE c LENGTH 98,
+        lv_sep111 TYPE c LENGTH 111.
+  lv_sep98  = c_sep+0(98).
+  lv_sep111 = c_sep+0(111).
+
+  REFRESH: lt_mail_body, lt_auslaufend, lt_abgelaufen.
+
+  " Betreff & Kopf-Infos
+  lv_subject = 'SAP-Kontraktüberwachung Buchungskreis 60 KENOW'.
+  WRITE p_past   TO lv_past_c.
+  WRITE p_vorl   TO lv_vorl_c.
+  WRITE gv_today TO lv_today_c.
+
+    LOOP AT pt_data INTO ls_out.
+    IF ls_out-resttage < 0.
+      APPEND ls_out TO lt_abgelaufen.
+    ELSE.
+      APPEND ls_out TO lt_auslaufend.
+    ENDIF.
+  ENDLOOP.
+
+  DESCRIBE TABLE pt_data       LINES lv_cnt_all.
+  DESCRIBE TABLE lt_auslaufend LINES lv_cnt_run.
+  DESCRIBE TABLE lt_abgelaufen LINES lv_cnt_exp.
+
+  " Kopfzeilen
+  CONCATENATE 'Kontrakt-Laufzeitprüfung BUKRS 60 KENOW Datum:' lv_today_c INTO lv_line SEPARATED BY space.
+  ls_mail_line-line = lv_line. APPEND ls_mail_line TO lt_mail_body.
+  CONCATENATE 'Vorlauf (Tage):' lv_vorl_c INTO lv_line SEPARATED BY space.
+  ls_mail_line-line = lv_line. APPEND ls_mail_line TO lt_mail_body.
+  IF p_inclp = 'X'.
+    CONCATENATE 'Vergangenheit aktiv: JA (Tage):' lv_past_c INTO lv_line SEPARATED BY space.
+  ELSE.
+    lv_line = 'Vergangenheit aktiv: NEIN'.
+  ENDIF.
+  ls_mail_line-line = lv_line. APPEND ls_mail_line TO lt_mail_body.
+  IF p_pos = 'X'.
+    ls_mail_line-line = 'Positionsprüfung: JA (Quelle: Findungstabelle YTPOPRESET_TS)'.
+  ELSE.
+    ls_mail_line-line = 'Positionsprüfung: NEIN'.
+  ENDIF.
+  APPEND ls_mail_line TO lt_mail_body.
+
+  " --- Zusammenfassung wie in der Liste (Treffer gesamt / Auslaufend / Abgelaufen)
+  IF lv_cnt_all > 0.
+    CLEAR lv_line.
+    WRITE lv_cnt_all TO lv_rest_c.
+    CONCATENATE 'Treffer gesamt:' lv_rest_c INTO lv_line SEPARATED BY space.
+    WRITE lv_cnt_run TO lv_rest_c.
+    CONCATENATE lv_line ' Auslaufend:' lv_rest_c INTO lv_line SEPARATED BY space.
+    WRITE lv_cnt_exp TO lv_rest_c.
+    CONCATENATE lv_line ' Abgelaufen:' lv_rest_c INTO lv_line SEPARATED BY space.
+    ls_mail_line-line = lv_line. APPEND ls_mail_line TO lt_mail_body.
+
+    " ULINE AT /(98)
+    ls_mail_line-line = lv_sep98. APPEND ls_mail_line TO lt_mail_body.
+    " SKIP 2
+    APPEND VALUE soli( line = space ) TO lt_mail_body.
+    APPEND VALUE soli( line = space ) TO lt_mail_body.
+
+    " ---------------------- AUSLAUFEND ----------------------
+    IF lt_auslaufend[] IS NOT INITIAL.
+      DATA(lv_hdr_ausl) = |AUSLAUFEND IN DEN NÄCHSTEN { p_vorl } TAGEN|.
+    ls_mail_line-line = lv_hdr_ausl.
+    APPEND ls_mail_line TO lt_mail_body.
+
+    " ULINE AT /(98)
+    ls_mail_line-line = lv_sep98.
+    APPEND ls_mail_line TO lt_mail_body.
+
+    CLEAR lv_row.
+    lv_row+0(10)  = 'KONTRAKT'.
+    lv_row+11(45) = 'LIEFERANT'.
+    lv_row+57(12) = 'STATUS'.
+    lv_row+70(10) = 'GÜLTIG-BIS'.
+    lv_row+86(10) = 'RESTTAGE'.
+    ls_mail_line-line = lv_row.
+    APPEND ls_mail_line TO lt_mail_body.
+
+   " ULINE AT /(98)
+   ls_mail_line-line = lv_sep98.
+   APPEND ls_mail_line TO lt_mail_body.
+
+      SORT lt_auslaufend BY resttage ASCENDING ebeln ASCENDING.
+      LOOP AT lt_auslaufend INTO ls_out.
+        CLEAR: lv_kdate_c, lv_rest_c, lv_row.
+        WRITE ls_out-kdate TO lv_kdate_c.
+        PERFORM format_resttage USING ls_out-resttage CHANGING lv_rest_c.
+
+        lv_row = space.
+        lv_row+0(10)  = ls_out-ebeln.
+        lv_row+11(45) = ls_out-name1.
+        lv_row+57(12) = ls_out-status.
+        lv_row+70(10) = lv_kdate_c.
+        lv_row+86(10) = lv_rest_c.
+
+        ls_mail_line-line = lv_row.
+        APPEND ls_mail_line TO lt_mail_body.
+      ENDLOOP.
+
+      " ULINE AT /(98)
+      ls_mail_line-line = lv_sep98. APPEND ls_mail_line TO lt_mail_body.
+      " SKIP 2
+      APPEND VALUE soli( line = space ) TO lt_mail_body.
+      APPEND VALUE soli( line = space ) TO lt_mail_body.
+    ENDIF.
+
+    " ---------------------- ABGELAUFEN (nur wenn Vergangenheit aktiv UND Daten) ----------------------
+    IF p_inclp = 'X' AND lt_abgelaufen[] IS NOT INITIAL.
+      ls_mail_line-line = 'ABGELAUFEN (Resttage < 0):'. APPEND ls_mail_line TO lt_mail_body.
+      " ULINE AT /(98)
+      ls_mail_line-line = lv_sep98. APPEND ls_mail_line TO lt_mail_body.
+
+    CLEAR lv_row.
+    lv_row+0(10)  = 'KONTRAKT'.
+    lv_row+11(45) = 'LIEFERANT'.
+    lv_row+57(12) = 'STATUS'.
+    lv_row+70(10) = 'GÜLTIG-BIS'.
+    lv_row+86(10) = 'RESTTAGE'.
+    ls_mail_line-line = lv_row.
+
+      APPEND ls_mail_line TO lt_mail_body.
+      " ULINE AT /(98)
+      ls_mail_line-line = lv_sep98. APPEND ls_mail_line TO lt_mail_body.
+
+      SORT lt_abgelaufen BY resttage ASCENDING ebeln ASCENDING.
+      LOOP AT lt_abgelaufen INTO ls_out.
+        CLEAR: lv_kdate_c, lv_rest_c, lv_row.
+        WRITE ls_out-kdate TO lv_kdate_c.
+        PERFORM format_resttage USING ls_out-resttage CHANGING lv_rest_c.
+
+        lv_row = space.
+        lv_row+0(10)  = ls_out-ebeln.
+        lv_row+11(45) = ls_out-name1.
+        lv_row+57(12) = ls_out-status.
+        lv_row+70(10) = lv_kdate_c.
+        lv_row+86(10) = lv_rest_c.
+
+        ls_mail_line-line = lv_row.
+        APPEND ls_mail_line TO lt_mail_body.
+      ENDLOOP.
+    ENDIF.
+  ENDIF.  " lv_cnt_all > 0
+
+  " ---------------------- POSITIONSABWEICHUNGEN ----------------------
+  DATA: ls_pos_out_m TYPE ty_pos_out,
+        ls_dev_m     TYPE ty_dev,
+        lv_k_c_m     TYPE char10,
+        lv_p_c_m     TYPE char10,
+        lv_d_c_m     TYPE char10,
+        lv_r_c_m     TYPE char10,
+        lv_any_dev   TYPE abap_bool.
+  lv_any_dev = abap_false.
+  LOOP AT gt_dev INTO ls_dev_m WHERE cnt_dev > 0.
+    lv_any_dev = abap_true.
+    EXIT.
+  ENDLOOP.
+
+  IF p_pos = 'X' AND lv_any_dev = abap_true AND lines( gt_pos_out ) > 0.
+    " SKIP 2
+    APPEND VALUE soli( line = space ) TO lt_mail_body.
+    APPEND VALUE soli( line = space ) TO lt_mail_body.
+
+
+    APPEND VALUE soli( line = 'POSITIONSABWEICHUNGEN IN DER FINDUNGSTABELLE:' ) TO lt_mail_body.
+
+    " ULINE AT /(111)
+    APPEND VALUE soli( line = lv_sep111 ) TO lt_mail_body.
+
+
+    CLEAR lv_row.
+    lv_row+0(10)  = 'KONTRAKT'.
+    lv_row+11(5)  = 'POS'.
+    lv_row+17(45) = 'LIEFERANT'.
+    lv_row+63(10) = 'KONTR.-BIS'.
+    lv_row+74(10) = 'POS-BIS'.
+    lv_row+86(12) = 'STATUS'.
+    lv_row+99(10) = 'RESTTAGE'.
+    APPEND VALUE soli( line = lv_row )
+     TO lt_mail_body.
+    " ULINE AT /(111)
+    APPEND VALUE soli( line = lv_sep111 ) TO lt_mail_body.
+
+    SORT gt_pos_out BY ebeln ebelp resttage.
+    LOOP AT gt_pos_out INTO ls_pos_out_m.
+      CLEAR: lv_k_c_m, lv_p_c_m, lv_d_c_m, lv_r_c_m, lv_row.
+      WRITE ls_pos_out_m-kdate    TO lv_k_c_m.
+      WRITE ls_pos_out_m-pos_bis  TO lv_p_c_m.
+      PERFORM format_resttage USING ls_pos_out_m-resttage CHANGING lv_r_c_m.
+
+      " Lieferant zum EBELN ermitteln
+      READ TABLE gt_out INTO ls_out WITH KEY ebeln = ls_pos_out_m-ebeln.
+
+
+      lv_row = space.
+      lv_row+0(10)  = ls_pos_out_m-ebeln.
+      lv_row+11(5)  = ls_pos_out_m-ebelp.
+      lv_row+17(45) = ls_out-name1.
+      lv_row+63(10) = lv_k_c_m.
+      lv_row+74(10) = lv_p_c_m.
+      lv_row+86(12) = ls_pos_out_m-status.
+      lv_row+99(10) = lv_r_c_m.
+
+      APPEND VALUE soli( line = lv_row ) TO lt_mail_body.
+    ENDLOOP.
+  ENDIF.
+
+  " --- Versand ---
+  TRY.
+      lo_send_request = cl_bcs=>create_persistent( ).
+      lo_document     = cl_document_bcs=>create_document(
+                          i_type    = 'RAW'
+                          i_text    = lt_mail_body
+                          i_subject = lv_subject ).
+      lo_send_request->set_document( lo_document ).
+      lo_send_request->add_recipient( cl_cam_address_bcs=>create_internet_address( pv_email ) ).
+      lo_send_request->set_send_immediately( 'X' ).
+      lo_send_request->send( ).
+      COMMIT WORK.
+    CATCH cx_bcs INTO lx_bcs.
+      WRITE: / 'Mailversand fehlgeschlagen:', lx_bcs->get_text( ).
+  ENDTRY.
+ENDFORM.
