@@ -1,0 +1,88 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_EQUI_TYP_EDT
+*&---------------------------------------------------------------------*
+*& DEV/PRD-Hilfsreport – Equipmenttyp (EQUI-EQTYP) ändern
+*& - User-Sperre: nur USER 'STUDENT'
+*& - Abbruch bei eingebautem/untergeordnetem Equipment
+*&
+*&
+*& Author : Student, Christian
+*& date   : 02.02.2026
+*& kind of p. : Report (x) Batch-Input ( ) Include ( )
+*& Sonstiges/others ( ) Modulpool ( )
+*&---------------------------------------------------------------------*
+*& Änderungshistorie
+*& Datum       Benutzer     Grund
+*&
+*----------------------------------------------------------------------*
+REPORT Y_PM_EQUI_TYP_EDT LINE-SIZE 200.
+
+
+PARAMETERS:
+  p_eqnr  TYPE equi-equnr OBLIGATORY,
+  p_eqtyp TYPE equi-eqtyp OBLIGATORY.
+
+DATA: ls_equi     TYPE equi,
+      ls_equz     TYPE equz,
+      lv_oldtype  TYPE equi-eqtyp,
+      lv_is_inst  TYPE abap_bool,
+      lv_has_tpln TYPE abap_bool.
+
+FIELD-SYMBOLS: <fs_tplnr> TYPE any.
+
+IF sy-uname <> 'STUDENT'.
+  WRITE: / 'Abbruch: Dieser Report darf nur durch den Modulbetreuer-PM ausgeführt werden. (Aktueller User: ', sy-uname, ')'.
+  LEAVE LIST-PROCESSING.
+ENDIF.
+
+SELECT SINGLE * FROM equi INTO ls_equi WHERE equnr = p_eqnr.
+IF sy-subrc <> 0.
+  WRITE: / 'Abbruch: Equipment nicht gefunden.'.
+  LEAVE LIST-PROCESSING.
+ENDIF.
+
+lv_oldtype = ls_equi-eqtyp.
+
+IF lv_oldtype = p_eqtyp.
+  WRITE: / 'Kein Update nötig. Equipment ', p_eqnr, ' hat bereits Typ ', p_eqtyp, '.'.
+  LEAVE LIST-PROCESSING.
+ENDIF.
+
+CLEAR: ls_equz, lv_is_inst, lv_has_tpln.
+SELECT SINGLE * FROM equz INTO ls_equz
+  WHERE equnr = p_eqnr
+    AND datbi = '99991231'.   " aktuelles Zeitsegment
+
+IF sy-subrc = 0.
+  ASSIGN COMPONENT 'TPLNR' OF STRUCTURE ls_equz TO <fs_tplnr>.
+  IF sy-subrc = 0 AND <fs_tplnr> IS ASSIGNED.
+    lv_has_tpln = abap_true.
+    IF <fs_tplnr> IS NOT INITIAL.
+      lv_is_inst = abap_true.
+    ENDIF.
+  ENDIF.
+
+  IF ls_equz-hequi IS NOT INITIAL.
+    lv_is_inst = abap_true.
+  ENDIF.
+ENDIF.
+
+IF lv_is_inst = abap_true.
+  WRITE: / 'Abbruch: Equipment ist eingebaut oder untergeordnet (laut EQUZ, aktuelles Zeitsegment).'.
+  IF lv_has_tpln = abap_true.
+    WRITE: / 'Hinweis: Installation am Technischen Platz wurde über TPLNR geprüft (falls vorhanden).'.
+  ELSE.
+    WRITE: / 'Hinweis: Installation wurde über HEQUI in EQUZ erkannt.'.
+  ENDIF.
+  WRITE: / 'Änderung des Equipmenttyps nur für lose, nicht eingebaute Werkzeuge erlaubt.'.
+  LEAVE LIST-PROCESSING.
+ENDIF.
+
+UPDATE equi SET eqtyp = p_eqtyp WHERE equnr = p_eqnr.
+
+IF sy-subrc = 0.
+  COMMIT WORK.
+  WRITE: / 'Typ angepasst: EQNR ', p_eqnr, ' von ', lv_oldtype, ' auf ', p_eqtyp, '.'.
+ELSE.
+  WRITE: / 'Fehler beim Update.'.
+ENDIF.
