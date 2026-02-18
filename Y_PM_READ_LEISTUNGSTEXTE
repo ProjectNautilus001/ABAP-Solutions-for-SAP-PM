@@ -1,0 +1,205 @@
+*&---------------------------------------------------------------------*
+*& +-+-+-+-+-+-+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+*& |R|E|P|O|R|T|  |Y|_|P|M|_|R|E|A|D|_|L|E|I|S|T|U|N|G|S|T|E|X|T|E|
+*& +-+-+-+-+-+-+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+*&---------------------------------------------------------------------*
+*& Liest Leistungstexte aus MM-Kontrakten, zeigt nur Positionen mit Text.
+*&
+*& Author     : ProjectNautilus
+*& Date       : 02.12.2025
+*& Type       : Report    (X)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&---------------------------------------------------------------------*
+* Änderungshistorie
+* Datum      Benutzer           Grund
+* ---------- -----------------  ---------------------------------------
+*&---------------------------------------------------------------------*
+
+REPORT y_pm_read_leistungstexte NO STANDARD PAGE HEADING.
+
+TABLES: ekko, ekpo, esll, stxh.
+
+DATA: lt_ekko        TYPE TABLE OF ekko,
+      lt_ekpo        TYPE TABLE OF ekpo,
+      lt_esll        TYPE TABLE OF esll,
+      lt_stxh        TYPE TABLE OF stxh,
+      lt_text        TYPE TABLE OF tline,
+      ls_ekko        TYPE ekko,
+      ls_ekpo        TYPE ekpo,
+      ls_esll        TYPE esll,
+      ls_stxh        TYPE stxh,
+      ls_text        TYPE tline,
+      lv_name        TYPE tdobname,
+      lv_pattern     TYPE tdname,
+      lv_subpack     TYPE string,
+      lv_packno_low  TYPE esll-packno,
+      lv_packno_high TYPE esll-packno,
+      lv_extrow_display TYPE esll-extrow,
+      lv_introw      TYPE esll-introw.
+
+SELECT-OPTIONS: s_ebeln FOR ekko-ebeln.
+PARAMETERS: p_sub AS CHECKBOX DEFAULT 'X' USER-COMMAND sel,
+            p_srv AS CHECKBOX DEFAULT 'X'.
+
+START-OF-SELECTION.
+
+  IF s_ebeln[] IS INITIAL.
+    WRITE: / 'Ohne Einkaufsbelegnummer???  (╥﹏╥)'.
+    RETURN.
+  ENDIF.
+
+  SELECT * FROM ekko INTO TABLE lt_ekko
+    WHERE ebeln IN s_ebeln.
+
+  IF lt_ekko IS INITIAL.
+    WRITE: / 'nüscht gefunden.'.
+    RETURN.
+  ENDIF.
+
+  LOOP AT lt_ekko INTO ls_ekko.
+
+    WRITE: / '============================================='.
+    WRITE: / 'Kontrakt:', ls_ekko-ebeln.
+    WRITE: / '============================================='.
+
+    SELECT * FROM ekpo INTO TABLE lt_ekpo
+      WHERE ebeln = ls_ekko-ebeln.
+
+    DELETE lt_ekpo WHERE packno IS INITIAL.
+
+    IF lt_ekpo IS INITIAL.
+      CONTINUE.
+    ENDIF.
+
+    LOOP AT lt_ekpo INTO ls_ekpo.
+
+      lv_packno_low  = ls_ekpo-packno.
+      lv_packno_high = lv_packno_low + 1.
+
+      SELECT * FROM esll INTO TABLE lt_esll
+        WHERE packno BETWEEN lv_packno_low AND lv_packno_high.
+
+      LOOP AT lt_esll INTO ls_esll.
+
+*----------------------------------------------------------------------*
+* Texte aus SUB_PACKNO
+*----------------------------------------------------------------------*
+        IF p_sub = 'X' AND ls_esll-sub_packno IS NOT INITIAL.
+
+          lv_subpack = ls_esll-sub_packno.
+          SHIFT lv_subpack LEFT DELETING LEADING '0'.
+          CONCATENATE '%' lv_subpack '%' INTO lv_pattern.
+
+          SELECT * FROM stxh INTO TABLE lt_stxh
+            WHERE tdobject = 'ESLL'
+              AND tdname LIKE lv_pattern
+              AND tdid = 'LLTX'
+              AND tdspras = sy-langu.
+
+          LOOP AT lt_stxh INTO ls_stxh.
+            CLEAR lt_text.
+            lv_name = ls_stxh-tdname.
+
+* EXTROW ermitteln aus TDNAME
+            lv_extrow_display = ls_esll-extrow.
+            lv_introw = lv_name+10(10). " INTROW aus TDNAME
+            LOOP AT lt_esll INTO DATA(ls_esll_help)
+              WHERE packno = lv_name(10) AND introw = lv_introw.
+              lv_extrow_display = ls_esll_help-extrow.
+              EXIT.
+            ENDLOOP.
+
+            CALL FUNCTION 'READ_TEXT'
+              EXPORTING
+                id       = ls_stxh-tdid
+                language = sy-langu
+                name     = lv_name
+                object   = ls_stxh-tdobject
+              TABLES
+                lines    = lt_text
+              EXCEPTIONS
+                not_found = 1
+                OTHERS    = 2.
+
+            IF sy-subrc = 0 AND lt_text IS NOT INITIAL.
+              WRITE: / '(╭ರ_•́)  Text gefunden: TDNAME =', ls_stxh-tdname.
+              WRITE: / '        Kontrakt:', ls_ekko-ebeln, 'Position:', ls_ekpo-ebelp.
+              IF lv_extrow_display IS NOT INITIAL.
+                WRITE: / '        EXTROW:', lv_extrow_display.
+              ENDIF.
+              WRITE: / '        PACKNO:', ls_esll-packno,
+                      'SRVPOS:', ls_esll-srvpos.
+
+
+              FORMAT COLOR COL_KEY INTENSIFIED ON.
+              LOOP AT lt_text INTO ls_text.
+                WRITE: / ls_text-tdline.
+              ENDLOOP.
+              FORMAT COLOR OFF.
+              WRITE: / '-----------------------------'.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+
+*----------------------------------------------------------------------*
+* Texte aus SRVPOS
+*----------------------------------------------------------------------*
+        IF p_srv = 'X' AND ls_esll-srvpos IS NOT INITIAL.
+
+          CLEAR lt_text.
+          lv_name = ls_esll-srvpos.
+
+* EXTROW ermitteln aus TDNAME (für SRVPOS nicht nötig, aber gleiche Logik)
+          lv_extrow_display = ls_esll-extrow.
+
+          CALL FUNCTION 'READ_TEXT'
+            EXPORTING
+              id       = 'LTXT'
+              language = sy-langu
+              name     = lv_name
+              object   = 'ASMD'
+            TABLES
+              lines    = lt_text
+            EXCEPTIONS
+              not_found = 1
+              OTHERS    = 2.
+
+          IF sy-subrc = 0 AND lt_text IS NOT INITIAL.
+            WRITE: / '(╭ರ_•́)  Text gefunden: TDNAME =', lv_name.
+            WRITE: / '        Kontrakt:', ls_ekko-ebeln, 'Position:', ls_ekpo-ebelp.
+            IF lv_extrow_display IS NOT INITIAL.
+              WRITE: / '        EXTROW:', lv_extrow_display.
+            ENDIF.
+            WRITE: / '        PACKNO:', ls_esll-packno,
+                    'SRVPOS:', ls_esll-srvpos.
+
+
+            FORMAT COLOR COL_KEY INTENSIFIED ON.
+            LOOP AT lt_text INTO ls_text.
+              WRITE: / ls_text-tdline.
+            ENDLOOP.
+            FORMAT COLOR OFF.
+            WRITE: / '-----------------------------'.
+          ENDIF.
+        ENDIF.
+
+      ENDLOOP.
+    ENDLOOP.
+
+    WRITE: /.
+
+  ENDLOOP.
+
+*----------------------------------------------------------------------*
+* Export in TXT-Datei
+*----------------------------------------------------------------------*
+* OPEN DATASET p_file FOR OUTPUT IN TEXT MODE ENCODING DEFAULT.
+*  IF sy-subrc = 0.
+*    LOOP AT lt_output INTO lv_line.
+*      TRANSFER lv_line TO p_file.
+*    ENDLOOP.
+*    CLOSE DATASET p_file.
+*    MESSAGE |Datei erfolgreich gespeichert unter: { p_file }| TYPE 'I'.
+*  ELSE.
+*    MESSAGE |Fehler beim Öffnen der Datei: { p_file }| TYPE 'E'.
+*  ENDIF.
