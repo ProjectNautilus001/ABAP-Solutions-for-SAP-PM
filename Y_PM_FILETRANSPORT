@@ -1,0 +1,66 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_FileTransport
+*&
+*&---------------------------------------------------------------------*
+*& Kopiert Dateien vom Quellverzeichnis in ein Zielverzeichnis.
+*&
+*&
+*&
+*& Author     : Student, Christian
+*& date       : 24.04.2025
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*----------------------------------------------------------------------*
+* Änderungshistorie                                                    *
+* Datum      Benutzer:                  Grund                          *
+* ---------- ----------------- --------------------------------------- *
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+REPORT Y_PM_FILETRANSPORT.
+
+
+PARAMETERS: p_s_file TYPE epsfilnam OBLIGATORY DEFAULT 'datei.txt',  " Quelldatei auf Applikationsserver
+            p_s_dir  TYPE epsdirnam OBLIGATORY DEFAULT '/usr/sap/trans/data/',  " Quelldirectory
+            p_t_file TYPE epsfilnam OBLIGATORY DEFAULT 'datei_kopie.txt',  " Zieldatei im Netzwerk
+            p_t_dir  TYPE epsdirnam OBLIGATORY DEFAULT '\\server\share\verzeichnis\'.  " Zieldirectory
+
+
+CONSTANTS: gc_overwrite TYPE char1 VALUE 'F'.  " Überschreibmodus: F = Überschreiben falls existiert
+
+START-OF-SELECTION.
+  PERFORM transfer_file.
+
+*&---------------------------------------------------------------------*
+*&      Form  TRANSFER_FILE
+*&---------------------------------------------------------------------*
+FORM transfer_file.
+  TRY.
+      " Datei vom Applikationsserver auf Netzwerkverzeichnis kopieren
+      cl_cts_language_file_io=>copy_files_local(
+        EXPORTING
+          im_source_file           = p_s_file
+          im_source_directory      = p_s_dir
+          im_target_file           = p_t_file
+          im_target_directory      = p_t_dir
+          im_overwrite_mode        = gc_overwrite
+        EXCEPTIONS
+          open_input_file_failed   = 1
+          open_output_file_failed  = 2
+          write_block_failed       = 3
+          read_block_failed        = 4
+          close_output_file_failed = 5
+          OTHERS                  = 6 ).
+
+      IF sy-subrc <> 0.
+        MESSAGE ID sy-msgid TYPE 'E' NUMBER sy-msgno
+                WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+      ELSE.
+        " Erfolgsmeldung mit den wichtigsten Informationen
+        MESSAGE s398(00) WITH 'Datei kopiert:' p_s_file 'nach' p_t_dir.
+      ENDIF.
+
+    CATCH cx_root INTO DATA(lx_error).
+      MESSAGE lx_error TYPE 'E'.
+  ENDTRY.
+ENDFORM.                    " TRANSFER_FILE
