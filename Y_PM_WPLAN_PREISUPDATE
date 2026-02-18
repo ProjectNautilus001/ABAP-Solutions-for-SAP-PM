@@ -1,0 +1,513 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_WPLAN_PREISUPDATE
+*&
+*&---------------------------------------------------------------------*
+*& Aktl. PRS-Konditionen aus MM-Kontrakt je LV-Leaf in interne Tabelle
+*& schreiben (A081 -> KONP). Wartungs-/Arbeitsplan lesen und ESLL-Preise
+*& (NETWR) per EXTROW-Mapping aktualisieren.
+*&
+*& Erweiterung:
+*& Schalter p_settbw: ESLL-TBTWR = NEU_Einzelpreis (KBETR) mit Skalierung
+*& Simulationsmodus (Report schreibt nicht in die Tabelle)
+*& DEBUG-Ausgabe (inkl. Eizelpreis im Echtlauf).
+*&
+*& Author     : ProjectNautilus
+*& date       : 12.01.2026
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*----------------------------------------------------------------------*
+* Änderungshistorie                                                    *
+* Datum      Benutzer:                  Grund                          *
+* ---------- ----------------- --------------------------------------- *
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+
+REPORT Y_PM_WPLAN_PREISUPDATE NO STANDARD PAGE HEADING.
+
+"--------------------------
+" Selektionsbild
+"--------------------------
+SELECTION-SCREEN BEGIN OF BLOCK kontrakt WITH FRAME TITLE text-k01.
+PARAMETERS p_ebeln TYPE ekko-ebeln OBLIGATORY.         " Kontraktnummer
+PARAMETERS p_ebelp TYPE ekpo-ebelp.                    " (optional) Position
+PARAMETERS p_werks TYPE werks_d    OBLIGATORY.         " Werk für A081
+PARAMETERS p_kschl TYPE konp-kschl DEFAULT 'PRS'.      " Konditionsart
+PARAMETERS p_kappl TYPE konh-kappl DEFAULT 'MS'.       " Anwendung
+SELECTION-SCREEN END OF BLOCK kontrakt.
+
+SELECTION-SCREEN SKIP 1.
+
+SELECTION-SCREEN BEGIN OF BLOCK plan WITH FRAME TITLE text-k02.
+PARAMETERS p_plnty TYPE plko-plnty DEFAULT 'A' OBLIGATORY.  " Tasklist-Typ
+PARAMETERS p_plnnr TYPE plko-plnnr OBLIGATORY.              " Plangruppe
+PARAMETERS p_plnal TYPE plko-plnal OBLIGATORY.              " Version/Zähler
+PARAMETERS p_vornr TYPE plpo-vornr.                         " Vorgang (opt.)
+SELECTION-SCREEN END OF BLOCK plan.
+
+SELECTION-SCREEN SKIP 1.
+
+SELECTION-SCREEN BEGIN OF BLOCK optionen WITH FRAME TITLE text-k03.
+PARAMETERS p_test    AS CHECKBOX DEFAULT 'X'.               " nur Simulation
+PARAMETERS p_dbg     AS CHECKBOX DEFAULT 'X'.               " Debug/Trace
+PARAMETERS p_setmp   AS CHECKBOX DEFAULT ''.                " MPOS-NETPR setzen
+PARAMETERS p_settbw  AS CHECKBOX DEFAULT 'X'.               " ESLL-TBTWR setzen
+SELECTION-SCREEN END OF BLOCK optionen.
+
+"--------------------------
+" Konstanten / Typen / Daten
+"--------------------------
+CONSTANTS: c_inf_datbi   TYPE dats VALUE '99991231',
+           c_numc10_zero TYPE esll-sub_packno VALUE '0000000000'.
+
+TYPES: BEGIN OF ty_leaf_ctrt,
+         packno TYPE esll-packno,
+         introw TYPE esll-introw,
+         extrow TYPE esll-extrow,
+         srvpos TYPE esll-srvpos,
+         ktext1 TYPE esll-ktext1,
+       END OF ty_leaf_ctrt.
+
+TYPES: BEGIN OF ty_konp_sel,
+         kbetr TYPE konp-kbetr,
+         konwa TYPE konp-konwa,
+         kpein TYPE konp-kpein,
+         kmein TYPE konp-kmein,
+       END OF ty_konp_sel.
+
+TYPES: BEGIN OF ty_price_ctrt,         " Preis aus KONP (via A081)
+         extrow TYPE esll-extrow,
+         packno TYPE esll-packno,
+         introw TYPE esll-introw,
+         srvpos TYPE esll-srvpos,
+         ktext1 TYPE esll-ktext1,
+         kbetr  TYPE konp-kbetr,       " Einzelpreis
+         konwa  TYPE konp-konwa,       " Währung
+         kmein  TYPE konp-kmein,       " Preiseinheit-ME
+         kpein  TYPE konp-kpein,       " Preiseinheit
+       END OF ty_price_ctrt.
+
+TYPES: BEGIN OF ty_out_tl,
+         packno  TYPE esll-packno,
+         introw  TYPE esll-introw,
+         extrow  TYPE esll-extrow,
+         ktext1  TYPE esll-ktext1,
+         meins   TYPE esll-meins,
+         menge   TYPE esll-menge,
+         peinh   TYPE esll-peinh,
+         netwr   TYPE esll-netwr,
+         brtwr   TYPE esll-brtwr,
+         subpack TYPE esll-sub_packno,
+         waers_h TYPE tcurc-waers,
+         vornr   TYPE plpo-vornr,
+       END OF ty_out_tl.
+
+DATA: gv_plnnr    TYPE plko-plnnr,
+      gv_top_pack TYPE esll-packno.
+
+DATA: gt_leaves_ctrt TYPE STANDARD TABLE OF ty_leaf_ctrt WITH EMPTY KEY,
+      gt_price_ctrt  TYPE STANDARD TABLE OF ty_price_ctrt WITH EMPTY KEY,
+      gs_price_ctrt  TYPE ty_price_ctrt.
+
+DATA: gt_out_tl TYPE STANDARD TABLE OF ty_out_tl WITH EMPTY KEY,
+      gs_out_tl TYPE ty_out_tl.
+
+DATA: gv_cnt_leaf     TYPE i,
+      gv_cnt_a081     TYPE i,
+      gv_cnt_konp     TYPE i,
+      gv_cnt_tl_rows  TYPE i,
+      gv_cnt_upd      TYPE i,
+      gv_cnt_skip     TYPE i,
+      gv_cnt_mpos     TYPE i,
+      gv_cnt_tbtwr    TYPE i.
+
+"--------------------------
+" Hilfs-Formroutinen
+"--------------------------
+FORM alpha_plnnr.
+  gv_plnnr = p_plnnr.
+  CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+    EXPORTING input  = gv_plnnr
+    IMPORTING output = gv_plnnr.
+ENDFORM.
+
+FORM dbg USING text TYPE string.
+  IF p_dbg = 'X'.
+    WRITE: / text.
+  ENDIF.
+ENDFORM.
+
+FORM get_top_packno USING    iv_ebeln TYPE ekko-ebeln
+                             iv_ebelp TYPE ekpo-ebelp
+                    CHANGING cv_pack  TYPE esll-packno.
+  CLEAR cv_pack.
+  IF iv_ebelp IS INITIAL.
+    SELECT SINGLE packno FROM ekpo INTO cv_pack
+      WHERE ebeln = iv_ebeln AND pstyp = '9' AND loekz = space.
+  ELSE.
+    SELECT SINGLE packno FROM ekpo INTO cv_pack
+      WHERE ebeln = iv_ebeln AND ebelp = iv_ebelp AND pstyp = '9' AND loekz = space.
+  ENDIF.
+ENDFORM.
+
+FORM collect_contract_leaves USING iv_root TYPE esll-packno.
+  DATA: lt_queue TYPE STANDARD TABLE OF esll-packno,
+        lt_seen  TYPE STANDARD TABLE OF esll-packno,
+        lv_cur   TYPE esll-packno,
+        lt_esll  TYPE STANDARD TABLE OF esll,
+        ls_esll  TYPE esll,
+        ls_leaf  TYPE ty_leaf_ctrt.
+  REFRESH: gt_leaves_ctrt, lt_queue, lt_seen.
+  gv_cnt_leaf = 0.
+  APPEND iv_root TO lt_queue.
+  WHILE lt_queue IS NOT INITIAL.
+    READ TABLE lt_queue INDEX 1 INTO lv_cur.
+    DELETE lt_queue INDEX 1.
+    READ TABLE lt_seen WITH KEY table_line = lv_cur TRANSPORTING NO FIELDS.
+    IF sy-subrc = 0. CONTINUE. ENDIF.
+    APPEND lv_cur TO lt_seen.
+    SELECT * FROM esll INTO TABLE lt_esll
+      WHERE packno = lv_cur AND del = space.
+    LOOP AT lt_esll INTO ls_esll.
+      IF ls_esll-sub_packno <> c_numc10_zero.
+        APPEND ls_esll-sub_packno TO lt_queue.
+      ENDIF.
+      IF ls_esll-package = space.
+        CLEAR ls_leaf.
+        ls_leaf-packno = ls_esll-packno.
+        ls_leaf-introw = ls_esll-introw.
+        ls_leaf-extrow = ls_esll-extrow.
+        ls_leaf-srvpos = ls_esll-srvpos.
+        ls_leaf-ktext1 = ls_esll-ktext1.
+        APPEND ls_leaf TO gt_leaves_ctrt.
+        gv_cnt_leaf = gv_cnt_leaf + 1.
+      ENDIF.
+    ENDLOOP.
+  ENDWHILE.
+ENDFORM.
+
+FORM build_contract_price_itab.
+  DATA: wa_a081     TYPE a081,
+        wa_konp_sel TYPE ty_konp_sel,
+        lv_msg      TYPE string,
+        lv_msg2     TYPE string.
+  CLEAR: gt_price_ctrt, gv_cnt_a081, gv_cnt_konp.
+  LOOP AT gt_leaves_ctrt ASSIGNING FIELD-SYMBOL(<leaf>).
+    CLEAR wa_a081.
+    SELECT SINGLE * FROM a081 INTO wa_a081
+      WHERE kappl      = p_kappl
+        AND kschl      = p_kschl
+        AND kont_pack  = <leaf>-packno
+        AND kont_zeile = <leaf>-introw
+        AND werks      = p_werks
+        AND datbi      = c_inf_datbi.
+    IF sy-subrc <> 0 OR wa_a081-knumh IS INITIAL.
+      gv_cnt_skip = gv_cnt_skip + 1.
+      CLEAR lv_msg.
+      CONCATENATE 'A081 nicht gefunden: PACKNO=' <leaf>-packno ', INTROW=' <leaf>-introw
+        INTO lv_msg SEPARATED BY space.
+      PERFORM dbg USING lv_msg.
+      CONTINUE.
+    ENDIF.
+    gv_cnt_a081 = gv_cnt_a081 + 1.
+
+    CLEAR wa_konp_sel.
+    SELECT SINGLE kbetr konwa kpein kmein
+      FROM konp
+      INTO CORRESPONDING FIELDS OF wa_konp_sel
+      WHERE knumh = wa_a081-knumh
+        AND kschl = p_kschl.
+    IF sy-subrc <> 0.
+      CLEAR lv_msg2.
+      CONCATENATE 'KONP nicht gefunden zu KNUMH=' wa_a081-knumh INTO lv_msg2 SEPARATED BY space.
+      PERFORM dbg USING lv_msg2.
+      CONTINUE.
+    ENDIF.
+    gv_cnt_konp = gv_cnt_konp + 1.
+
+    CLEAR gs_price_ctrt.
+    gs_price_ctrt-extrow = <leaf>-extrow.
+    gs_price_ctrt-packno = <leaf>-packno.
+    gs_price_ctrt-introw = <leaf>-introw.
+    gs_price_ctrt-srvpos = <leaf>-srvpos.
+    gs_price_ctrt-ktext1 = <leaf>-ktext1.
+    gs_price_ctrt-kbetr  = wa_konp_sel-kbetr.
+    gs_price_ctrt-konwa  = wa_konp_sel-konwa.
+    gs_price_ctrt-kmein  = wa_konp_sel-kmein.
+    gs_price_ctrt-kpein  = wa_konp_sel-kpein.
+    APPEND gs_price_ctrt TO gt_price_ctrt.
+  ENDLOOP.
+ENDFORM.
+
+FORM read_tasklist_esll.
+  DATA: lt_plas  TYPE STANDARD TABLE OF plas,
+        lt_plpo  TYPE STANDARD TABLE OF plpo,
+        lt_mpos  TYPE STANDARD TABLE OF mpos,
+        ls_plpo  TYPE plpo,
+        ls_mpos  TYPE mpos,
+        ls_eslh  TYPE eslh,
+        lt_esll  TYPE STANDARD TABLE OF esll,
+        ls_esll  TYPE esll,
+        lt_stack TYPE STANDARD TABLE OF esll-packno,
+        lv_pack  TYPE esll-packno.
+  CLEAR gt_out_tl.
+
+  SELECT * FROM plas INTO TABLE lt_plas
+    WHERE plnty = p_plnty AND plnnr = gv_plnnr AND plnal = p_plnal.
+
+  IF lt_plas IS NOT INITIAL.
+    SELECT * FROM plpo INTO TABLE lt_plpo
+      FOR ALL ENTRIES IN lt_plas
+      WHERE plnty = lt_plas-plnty
+        AND plnnr = lt_plas-plnnr
+        AND plnkn = lt_plas-plnkn.
+
+    LOOP AT lt_plpo INTO ls_plpo.
+      IF ( p_vornr IS INITIAL OR ls_plpo-vornr = p_vornr )
+         AND ls_plpo-packno IS NOT INITIAL.
+        CLEAR ls_eslh.
+        SELECT SINGLE * FROM eslh INTO ls_eslh WHERE packno = ls_plpo-packno.
+        REFRESH lt_stack.
+        APPEND ls_plpo-packno TO lt_stack.
+        WHILE lt_stack IS NOT INITIAL.
+          READ TABLE lt_stack INDEX 1 INTO lv_pack.
+          DELETE lt_stack INDEX 1.
+          REFRESH lt_esll.
+          SELECT * FROM esll INTO TABLE lt_esll WHERE packno = lv_pack.
+          LOOP AT lt_esll INTO ls_esll.
+            CLEAR gs_out_tl.
+            gs_out_tl-packno  = lv_pack.
+            gs_out_tl-introw  = ls_esll-introw.
+            gs_out_tl-extrow  = ls_esll-extrow.
+            gs_out_tl-ktext1  = ls_esll-ktext1.
+            gs_out_tl-meins   = ls_esll-meins.
+            gs_out_tl-menge   = ls_esll-menge.
+            gs_out_tl-peinh   = ls_esll-peinh.
+            gs_out_tl-netwr   = ls_esll-netwr.
+            gs_out_tl-brtwr   = ls_esll-brtwr.
+            gs_out_tl-subpack = ls_esll-sub_packno.
+            gs_out_tl-waers_h = ls_eslh-waers.
+            gs_out_tl-vornr   = ls_plpo-vornr.
+            IF gs_out_tl-extrow = c_numc10_zero AND gs_out_tl-subpack = c_numc10_zero.
+              CONTINUE.
+            ENDIF.
+            APPEND gs_out_tl TO gt_out_tl.
+            IF ls_esll-sub_packno IS NOT INITIAL.
+              APPEND ls_esll-sub_packno TO lt_stack.
+            ENDIF.
+          ENDLOOP.
+        ENDWHILE.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+  IF gt_out_tl IS INITIAL.
+    SELECT * FROM mpos INTO TABLE lt_mpos
+      WHERE plnty = p_plnty AND plnnr = gv_plnnr AND plnal = p_plnal.
+    LOOP AT lt_mpos INTO ls_mpos WHERE packno IS NOT INITIAL.
+      CLEAR ls_eslh.
+      SELECT SINGLE * FROM eslh INTO ls_eslh WHERE packno = ls_mpos-packno.
+      REFRESH lt_stack.
+      APPEND ls_mpos-packno TO lt_stack.
+      WHILE lt_stack IS NOT INITIAL.
+        READ TABLE lt_stack INDEX 1 INTO lv_pack.
+        DELETE lt_stack INDEX 1.
+        REFRESH lt_esll.
+        SELECT * FROM esll INTO TABLE lt_esll WHERE packno = lv_pack.
+        LOOP AT lt_esll INTO ls_esll.
+          CLEAR gs_out_tl.
+          gs_out_tl-packno  = lv_pack.
+          gs_out_tl-introw  = ls_esll-introw.
+          gs_out_tl-extrow  = ls_esll-extrow.
+          gs_out_tl-ktext1  = ls_esll-ktext1.
+          gs_out_tl-meins   = ls_esll-meins.
+          gs_out_tl-menge   = ls_esll-menge.
+          gs_out_tl-peinh   = ls_esll-peinh.
+          gs_out_tl-netwr   = ls_esll-netwr.
+          gs_out_tl-brtwr   = ls_esll-brtwr.
+          gs_out_tl-subpack = ls_esll-sub_packno.
+          gs_out_tl-waers_h = ls_eslh-waers.
+          APPEND gs_out_tl TO gt_out_tl.
+          IF ls_esll-sub_packno IS NOT INITIAL.
+            APPEND ls_esll-sub_packno TO lt_stack.
+          ENDIF.
+        ENDLOOP.
+      ENDWHILE.
+    ENDLOOP.
+  ENDIF.
+
+  DESCRIBE TABLE gt_out_tl LINES gv_cnt_tl_rows.
+ENDFORM.
+
+FORM update_tasklist_prices.
+  DATA: lv_new_unit  TYPE konp-kbetr,
+        lv_new_netwr TYPE esll-netwr,
+        lv_scale     TYPE p LENGTH 16 DECIMALS 6,
+        ls_price     TYPE ty_price_ctrt,
+        lv_alt_unit  TYPE p LENGTH 16 DECIMALS 6,
+        lv_old_netwr TYPE esll-netwr.
+  DATA: ls_mpos TYPE mpos.
+
+  SORT gt_price_ctrt BY extrow.
+  SORT gt_out_tl     BY packno vornr extrow.
+
+  LOOP AT gt_out_tl INTO gs_out_tl.
+    CLEAR: ls_price, lv_new_unit, lv_new_netwr, lv_scale, lv_alt_unit, lv_old_netwr.
+
+    READ TABLE gt_price_ctrt INTO ls_price
+      WITH KEY extrow = gs_out_tl-extrow BINARY SEARCH.
+    IF sy-subrc <> 0.
+      gv_cnt_skip = gv_cnt_skip + 1.
+      CONTINUE.
+    ENDIF.
+
+    IF ls_price-konwa <> gs_out_tl-waers_h.
+      gv_cnt_skip = gv_cnt_skip + 1.
+      CONTINUE.
+    ENDIF.
+
+    IF gs_out_tl-peinh IS INITIAL OR gs_out_tl-menge IS INITIAL.
+      gv_cnt_skip = gv_cnt_skip + 1.
+      CONTINUE.
+    ENDIF.
+
+    lv_new_unit  = ls_price-kbetr.
+    lv_scale     = gs_out_tl-menge / gs_out_tl-peinh.
+    lv_new_netwr = lv_new_unit * lv_scale.
+    lv_old_netwr = gs_out_tl-netwr.
+    IF lv_scale = 0.
+      lv_alt_unit = 0.
+    ELSE.
+      lv_alt_unit = lv_old_netwr / lv_scale.
+    ENDIF.
+
+    IF p_test = 'X'.
+      WRITE: / 'TEST: EXTROW=', gs_out_tl-extrow,
+               ' ALT_Einzelpreis~=', lv_alt_unit,
+               ' NEU_Einzelpreis=', lv_new_unit,
+               ' Text=', gs_out_tl-ktext1.
+      gv_cnt_upd = gv_cnt_upd + 1.
+    ELSE.
+      " Echtlauf: keine zeilenweisen Debug-PRINTs mehr
+      UPDATE esll
+         SET netwr = lv_new_netwr
+             brtwr = lv_new_netwr
+       WHERE packno = gs_out_tl-packno
+         AND introw = gs_out_tl-introw.
+      IF sy-subrc = 0.
+        gv_cnt_upd = gv_cnt_upd + 1.
+      ELSE.
+        gv_cnt_skip = gv_cnt_skip + 1.
+      ENDIF.
+
+      " ESLL-TBTWR = NEU_Einzelpreis
+      IF p_settbw = 'X'.
+        DATA: lv_tbtwr_new TYPE esll-tbtwr,
+              lv_peinh_esll TYPE p LENGTH 16 DECIMALS 6,
+              lv_kpein_konp TYPE p LENGTH 16 DECIMALS 6,
+              lv_factor     TYPE p LENGTH 16 DECIMALS 6.
+        lv_peinh_esll = gs_out_tl-peinh.
+        lv_kpein_konp = ls_price-kpein.
+        lv_factor     = 1.
+        IF ls_price-kmein = gs_out_tl-meins.
+          IF lv_kpein_konp IS INITIAL OR lv_kpein_konp = 0.
+            lv_factor = 1.
+          ELSE.
+            lv_factor = lv_peinh_esll / lv_kpein_konp.
+          ENDIF.
+          lv_tbtwr_new = ls_price-kbetr * lv_factor.
+          UPDATE esll
+             SET tbtwr = lv_tbtwr_new
+           WHERE packno = gs_out_tl-packno
+             AND introw = gs_out_tl-introw.
+          IF sy-subrc = 0.
+            gv_cnt_tbtwr = gv_cnt_tbtwr + 1.
+          ENDIF.
+        ELSE.
+          " ME-Differenz: keine Ausgabe
+        ENDIF.
+      ENDIF.  " p_settbw
+
+      " MPOS-Kopfpreis (optional)
+      IF p_setmp = 'X'.
+        CLEAR ls_mpos.
+        SELECT SINGLE * FROM mpos INTO ls_mpos
+          WHERE plnty = p_plnty
+            AND plnnr = gv_plnnr
+            AND plnal = p_plnal
+            AND packno = gs_out_tl-packno.
+        IF sy-subrc = 0.
+          UPDATE mpos SET netpr = lv_new_unit
+            WHERE plnty = ls_mpos-plnty
+              AND plnnr = ls_mpos-plnnr
+              AND plnal = ls_mpos-plnal
+              AND wppos = ls_mpos-wppos.
+          IF sy-subrc = 0.
+            gv_cnt_mpos = gv_cnt_mpos + 1.
+          ENDIF.
+        ENDIF.
+      ENDIF.  " p_setmp
+    ENDIF.  " Echtlauf/Test
+  ENDLOOP.
+
+  IF p_test <> 'X'.
+    COMMIT WORK.
+  ENDIF.
+ENDFORM.
+
+"--------------------------
+" Hauptprogramm
+"--------------------------
+START-OF-SELECTION.
+IF p_dbg = 'X'.
+  WRITE: / 'Selektionsparameter:',
+         / 'EBELN', p_ebeln, 'EBELP', p_ebelp,
+         / 'WERKS', p_werks, 'KSCHL', p_kschl, 'KAPPL', p_kappl,
+         / 'Tasklist', p_plnty, p_plnnr, '/', p_plnal, ' VORNR', p_vornr,
+         / 'TEST', p_test, 'DEBUG', p_dbg,
+         / 'SET_MPOS', p_setmp, 'SET_TBTWR', p_settbw.
+  ULINE.
+ENDIF.
+
+PERFORM alpha_plnnr.
+
+PERFORM get_top_packno USING p_ebeln p_ebelp CHANGING gv_top_pack.
+IF gv_top_pack IS INITIAL.
+  WRITE: / 'Fehler: EKPO-PACKNO (Kontrakt) nicht ermittelbar.'.
+  STOP.
+ENDIF.
+
+DATA lv_msg3 TYPE string.
+CLEAR lv_msg3.
+CONCATENATE 'Kontrakt PACKNO (Root):' gv_top_pack INTO lv_msg3 SEPARATED BY space.
+PERFORM dbg USING lv_msg3.
+
+PERFORM collect_contract_leaves USING gv_top_pack.
+IF gt_leaves_ctrt IS INITIAL.
+  WRITE: / 'Hinweis: Keine Leaf-Services im Kontrakt-LV gefunden.'.
+  STOP.
+ENDIF.
+
+PERFORM build_contract_price_itab.
+
+WRITE: / 'Kontrakt-Leafs:', gv_cnt_leaf,
+       / 'A081-Treffer (heute gültig):', gv_cnt_a081,
+       / 'KONP-Preise gelesen:', gv_cnt_konp.
+ULINE.
+
+PERFORM read_tasklist_esll.
+IF gt_out_tl IS INITIAL.
+  WRITE: / 'Keine ESLL-Preiszeilen in Tasklist gefunden (PLPO/MPOS).'.
+  STOP.
+ENDIF.
+
+WRITE: / 'Tasklist-Preiszeilen:', gv_cnt_tl_rows.
+ULINE.
+
+PERFORM update_tasklist_prices.
+ULINE.
+WRITE: / 'Update-Zusammenfassung:',
+       / 'Simulierte/Aktualisierte Zeilen:', gv_cnt_upd,
+       / 'Übersprungen:', gv_cnt_skip,
+       / 'MPOS-NETPR gesetzt:', gv_cnt_mpos,
+       / 'ESLL-TBTWR gesetzt:', gv_cnt_tbtwr.
