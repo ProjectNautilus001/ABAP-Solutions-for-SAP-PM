@@ -1,0 +1,82 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_DELETE_FILE
+*&
+*&---------------------------------------------------------------------*
+*& Löscht Dateien aus einen Zielverzeichnis.
+*&
+*&
+*&
+*& Author     : Student, Christian
+*& date       : 07.10.2025
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*----------------------------------------------------------------------*
+* Änderungshistorie                                                    *
+* Datum      Benutzer:                  Grund                          *
+* ---------- ----------------- --------------------------------------- *
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+REPORT Y_PM_DELETE_FILE.
+
+PARAMETERS: p_dir TYPE string LOWER CASE OBLIGATORY
+            DEFAULT '/usr/sap/tmp/GR55_Report_Painter'
+            VISIBLE LENGTH 80.
+
+SELECTION-SCREEN BEGIN OF BLOCK file_block WITH FRAME TITLE TEXT-001.
+PARAMETERS: p_file1 TYPE string LOWER CASE VISIBLE LENGTH 40,
+            p_file2 TYPE string LOWER CASE VISIBLE LENGTH 40,
+            p_file3 TYPE string LOWER CASE VISIBLE LENGTH 40,
+            p_file4 TYPE string LOWER CASE VISIBLE LENGTH 40,
+            p_file5 TYPE string LOWER CASE VISIBLE LENGTH 40.
+SELECTION-SCREEN END OF BLOCK file_block.
+
+DATA: lv_fullpath TYPE string,
+      lt_files    TYPE TABLE OF string,
+      lv_file     TYPE string.
+
+START-OF-SELECTION.
+
+* Sammle alle eingegebenen Dateien
+  IF p_file1 IS NOT INITIAL. APPEND p_file1 TO lt_files. ENDIF.
+  IF p_file2 IS NOT INITIAL. APPEND p_file2 TO lt_files. ENDIF.
+  IF p_file3 IS NOT INITIAL. APPEND p_file3 TO lt_files. ENDIF.
+  IF p_file4 IS NOT INITIAL. APPEND p_file4 TO lt_files. ENDIF.
+  IF p_file5 IS NOT INITIAL. APPEND p_file5 TO lt_files. ENDIF.
+
+  IF lt_files IS INITIAL.
+    MESSAGE 'Keine Dateien zum Löschen angegeben!' TYPE 'E'.
+    RETURN.
+  ENDIF.
+
+* Für Server-Zugriff OPEN DATASET
+  LOOP AT lt_files INTO lv_file.
+    CONDENSE lv_file.
+    CONCATENATE p_dir '/' lv_file INTO lv_fullpath.
+
+    WRITE: / 'Prüfe Datei:', lv_fullpath.
+
+    " Prüfen ob Datei existiert
+    DATA(lv_exists) = abap_false.
+    OPEN DATASET lv_fullpath FOR INPUT IN TEXT MODE ENCODING DEFAULT.
+    IF sy-subrc = 0.
+      lv_exists = abap_true.
+      CLOSE DATASET lv_fullpath.
+    ENDIF.
+
+    IF lv_exists = abap_false.
+      WRITE: / '➤ Datei nicht gefunden:', lv_fullpath.
+      CONTINUE.
+    ENDIF.
+
+    " Datei löschen
+    DELETE DATASET lv_fullpath.
+    IF sy-subrc = 0.
+      WRITE: / '✓ Datei erfolgreich gelöscht:', lv_file.
+    ELSE.
+      WRITE: / '✗ Fehler beim Löschen:', lv_file, 'Subrc:', sy-subrc.
+    ENDIF.
+    SKIP.
+  ENDLOOP.
+
+  WRITE: / 'Löschvorgang abgeschlossen.'.
