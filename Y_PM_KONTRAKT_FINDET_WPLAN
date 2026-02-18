@@ -1,0 +1,109 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_KONTRAKT_FINDET_WPLAN
+*&---------------------------------------------------------------------*
+*& Findet alle PLPO-Vorgänge mit gegebener EBELN und listet:
+*& PLNNR (Plangruppe), LTXA1 (Kurztext), VORNR.
+*& Prüft in JEST über OBJEKTID ob aktiv
+*&
+*&
+*& Author : 
+*& date   : 05.02.2026
+*& kind of p. : Report (x) Batch-Input ( ) Include ( )
+*& Sonstiges/others ( ) Modulpool ( )
+*&---------------------------------------------------------------------*
+*& Änderungshistorie
+*& Datum     Benutzer   Grund
+*&---------------------------------------------------------------------*
+REPORT Y_PM_KONTRAKT_FINDET_WPLAN NO STANDARD PAGE HEADING.
+
+
+TABLES: plpo.
+
+PARAMETERS p_ebeln TYPE ebeln OBLIGATORY.
+
+TYPES: BEGIN OF ty_out,
+         warpl TYPE warpl,        " Wartungsplan
+         wapos TYPE wapos,        " Wartungsplanposition
+         plnnr TYPE plnnr,        " Plangruppe
+         ltxa1 TYPE ltxa1,        " Kurztext Vorgang
+       END OF ty_out.
+
+DATA: lt_out        TYPE STANDARD TABLE OF ty_out WITH DEFAULT KEY,
+      ls_out        TYPE ty_out,
+      lv_count      TYPE i,
+      lv_last_warpl TYPE warpl,
+      lv_is_first   TYPE abap_bool.
+
+START-OF-SELECTION.
+
+  SELECT DISTINCT
+         mpos~warpl,
+         mpos~wapos,
+         plpo~plnnr,
+         plpo~ltxa1
+    FROM plpo
+    INNER JOIN mpos
+      ON mpos~plnty = plpo~plnty
+     AND mpos~plnnr = plpo~plnnr
+    INNER JOIN mpla
+      ON mpla~warpl = mpos~warpl
+
+    " PLAN inaktiv? (STAT = 'I0320', INACT = ' ')
+    LEFT OUTER JOIN jest AS jestp
+      ON jestp~objnr = mpla~objnr
+     AND jestp~stat  = 'I0320'
+     AND jestp~inact = ' '
+
+    " POSITION inaktiv? (STAT = 'I0320', INACT = ' ')
+    LEFT OUTER JOIN jest AS jesti
+      ON jesti~objnr = mpos~objnr
+     AND jesti~stat  = 'I0320'
+     AND jesti~inact = ' '
+
+    INTO TABLE @lt_out
+    WHERE plpo~ebeln = @p_ebeln
+      AND jestp~stat IS NULL            " Plan NICHT inaktiv
+      AND jesti~stat IS NULL.           " Position NICHT inaktiv
+
+  IF sy-subrc <> 0 OR lt_out IS INITIAL.
+    WRITE: / 'Keine AKTIVEN Wartungspläne/-positionen für EBELN', p_ebeln, 'gefunden.'.
+    RETURN.
+  ENDIF.
+
+  SORT lt_out BY warpl wapos plnnr ltxa1.
+  DELETE ADJACENT DUPLICATES FROM lt_out COMPARING warpl wapos plnnr ltxa1.
+
+  lv_is_first = abap_true.
+
+  " Kopfzeile
+  FORMAT COLOR COL_HEADING INTENSIFIED ON.
+  ULINE.
+  WRITE: /(12) 'W-Plan',
+         (10) 'W-Pos',
+         (20) 'Plangruppe',
+         (50) 'Kurztext Vorgang'.
+  ULINE.
+  FORMAT RESET.
+
+  LOOP AT lt_out INTO ls_out.
+
+    " Gruppentrennlinie wenn Wartungsplan wechselt
+    IF lv_is_first = abap_false AND ls_out-warpl <> lv_last_warpl.
+      ULINE AT /(79).
+    ENDIF.
+
+    lv_count = lv_count + 1.
+
+    WRITE: /(12) ls_out-warpl,
+           (10)  ls_out-wapos,
+           (20)  ls_out-plnnr,
+           (50)  ls_out-ltxa1.
+
+    lv_last_warpl = ls_out-warpl.
+    lv_is_first   = abap_false.
+
+  ENDLOOP.
+
+  ULINE.
+  WRITE: / 'Treffer gesamt :', lv_count.
+  WRITE: / 'Kontrakt:', p_ebeln.
