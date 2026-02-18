@@ -1,0 +1,110 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_TP_INHERIT_WARRANTY
+*&---------------------------------------------------------------------*
+*& vererbt Garantie Beginn und Ende des übergeordneten Technischen Pl.
+*& an alle untergeordneten Plätze und schreibt in die Tabelle BGMKOBJ.
+*&
+*&
+*& Author     : 
+*& date       : 28.11.2025
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*----------------------------------------------------------------------*
+* Änderungshistorie                                                    *
+* Datum      Benutzer:                  Grund                          *
+* ---------- ----------------- --------------------------------------- *
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+REPORT y_pm_tp_inherit_warranty.
+
+PARAMETERS: p_tplnr TYPE iflot-tplnr OBLIGATORY,
+            p_test  AS CHECKBOX DEFAULT abap_true.
+
+TYPES: BEGIN OF ty_child,
+         tplnr TYPE iflot-tplnr,
+         objnr TYPE iflot-objnr,
+       END OF ty_child.
+
+DATA: lv_objnr_parent      TYPE iflot-objnr,
+      lt_child             TYPE TABLE OF ty_child,
+      lv_pattern           TYPE string,
+      lv_status            TYPE string,
+      wa_bgmkobj_parent    TYPE bgmkobj,
+      wa_bgmkobj_child     TYPE bgmkobj.
+
+" Autoritätsprüfung Hinweis
+AUTHORITY-CHECK OBJECT 'I_FL' ID 'TPLNR' FIELD p_tplnr ID 'ACTVT' FIELD '02'.
+IF sy-subrc <> 0.
+  WRITE: / 'Hinweis: Autoritätsprüfung fehlgeschlagen. Bitte Berechtigungen prüfen.'.
+ENDIF.
+
+
+" 1. Übergeordneten Platz lesen
+SELECT SINGLE objnr
+  FROM iflot
+  INTO @lv_objnr_parent
+  WHERE tplnr = @p_tplnr.
+IF sy-subrc <> 0.
+  MESSAGE 'Übergeordneter technischer Platz nicht gefunden' TYPE 'E'.
+ENDIF.
+
+
+" 2. Gewährleistungsdaten für übergeordneten Platz lesen
+SELECT SINGLE *
+  FROM bgmkobj
+  INTO CORRESPONDING FIELDS OF @wa_bgmkobj_parent
+  WHERE j_objnr = @lv_objnr_parent.
+IF sy-subrc <> 0.
+  MESSAGE 'Keine Gewährleistungsdaten für übergeordneten Platz gefunden' TYPE 'E'.
+ENDIF.
+
+
+" 3. Untergeordnete Plätze lesen
+lv_pattern = p_tplnr && '%'.
+
+SELECT tplnr, objnr
+  FROM iflot
+  INTO TABLE @lt_child
+  WHERE tplnr LIKE @lv_pattern
+    AND tplnr <> @p_tplnr.
+
+IF lt_child IS INITIAL.
+  MESSAGE 'Keine untergeordneten technischen Plätze gefunden' TYPE 'I'.
+ENDIF.
+
+WRITE: / 'Übergeordneter Platz:', p_tplnr,
+       / 'Testlauf:', p_test.
+
+
+" 4. Verarbeitung der untergeordneten Plätze mit MODIFY
+LOOP AT lt_child ASSIGNING FIELD-SYMBOL(<child>).
+  IF p_test = abap_true.
+    lv_status = |SIMULATION: Platz { <child>-tplnr } würde aktualisiert oder neu angelegt werden.|.
+  ELSE.
+    CLEAR wa_bgmkobj_child.
+    wa_bgmkobj_child = wa_bgmkobj_parent.
+    wa_bgmkobj_child-j_objnr = <child>-objnr.
+    wa_bgmkobj_child-erdat   = sy-datum.
+    wa_bgmkobj_child-erzei   = sy-uzeit.
+    wa_bgmkobj_child-gaerb   = 'X'.
+
+    " MODIFY entscheidet ob INSERT oder UPDATE
+    MODIFY bgmkobj FROM @wa_bgmkobj_child.
+
+    IF sy-subrc = 0.
+      lv_status = |Platz { <child>-tplnr } erfolgreich verarbeitet.|.
+    ELSE.
+      lv_status = |Fehler bei Platz { <child>-tplnr }.|.
+    ENDIF.
+  ENDIF.
+
+  WRITE: / lv_status.
+ENDLOOP.
+
+IF p_test = abap_false.
+  COMMIT WORK.
+  WRITE: / 'Änderungen wurden gespeichert.'.
+ELSE.
+  WRITE: / 'Testlauf abgeschlossen. Keine Änderungen gespeichert.'.
+ENDIF.
