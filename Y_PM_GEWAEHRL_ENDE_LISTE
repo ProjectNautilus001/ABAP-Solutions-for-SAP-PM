@@ -1,0 +1,213 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_GEWAEHRL_ENDE_LISTE
+*&
+*&---------------------------------------------------------------------*
+*& Prüft Gewährleistungszeiträume in Tech.Plätzen und Equis.
+*& kann eine Mail versenden wenn Restlaufzeit unterschritten wird.
+*&
+*&
+*& Author     : 
+*& date       : 26.11.2025
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*----------------------------------------------------------------------*
+* Änderungshistorie                                                    *
+* Datum      Benutzer:                  Grund                          *
+* ---------- ----------------- --------------------------------------- *
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+
+REPORT y_pm_gewaehrl_ende_liste.
+
+TABLES: iflot, equi.
+
+TYPES: BEGIN OF zgewaehr_line,
+         objektart TYPE char10,
+         nummer    TYPE char30,
+         beginn    TYPE sy-datum,
+         ende      TYPE sy-datum,
+         resttage  TYPE i,
+         status    TYPE char40,
+       END OF zgewaehr_line.
+
+DATA: lv_today  TYPE sy-datum,
+      lv_days   TYPE i,
+      lv_start  TYPE sy-datum,
+      lv_end    TYPE sy-datum,
+      lt_output TYPE TABLE OF zgewaehr_line,
+      ls_output TYPE zgewaehr_line,
+      lv_mail_needed TYPE abap_bool.
+
+lv_today = sy-datum.
+
+" Selektionsbildschirm
+SELECT-OPTIONS: s_tplnr FOR iflot-tplnr,
+                s_equnr FOR equi-equnr.
+PARAMETERS: p_rest  TYPE i DEFAULT 90 OBLIGATORY, " Standard 90 Tage
+            p_email TYPE ad_smtpadr LOWER CASE,
+            p_send  AS CHECKBOX DEFAULT ' '.
+
+START-OF-SELECTION.
+
+  " --- Technische Plätze ---
+  IF s_tplnr[] IS NOT INITIAL.
+    SELECT tplnr, objnr
+      FROM iflot
+      INTO TABLE @DATA(lt_tpl)
+      WHERE tplnr IN @s_tplnr.
+
+    LOOP AT lt_tpl INTO DATA(ls_tpl).
+      CLEAR: lv_start, lv_end, ls_output.
+
+      SELECT SINGLE gwldt, gwlen
+        FROM bgmkobj
+        INTO (@lv_start, @lv_end)
+        WHERE j_objnr = @ls_tpl-objnr.
+
+      IF lv_start IS INITIAL OR lv_end IS INITIAL.
+        CONTINUE.
+      ENDIF.
+
+      ls_output-objektart = 'TPL'.
+      ls_output-nummer    = ls_tpl-tplnr.
+      ls_output-beginn    = lv_start.
+      ls_output-ende      = lv_end.
+
+      lv_days = lv_end - lv_today.
+      ls_output-resttage = lv_days.
+
+      IF lv_today >= lv_start AND lv_today <= lv_end.
+        ls_output-status = 'Gewährleistung vorhanden'.
+      ELSEIF lv_today > lv_end.
+        ls_output-status = 'Gewährleistung abgelaufen'.
+      ELSE.
+        ls_output-status = 'Gewährleistung noch nicht gültig'.
+      ENDIF.
+
+      " Nur innerhalb Restlaufzeit und nicht abgelaufen
+      IF lv_days >= 0 AND lv_days <= p_rest.
+        APPEND ls_output TO lt_output.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+  " --- Equipment ---
+  IF s_equnr[] IS NOT INITIAL.
+    SELECT equnr, objnr
+      FROM equi
+      INTO TABLE @DATA(lt_equi)
+      WHERE equnr IN @s_equnr.
+
+    LOOP AT lt_equi INTO DATA(ls_equi).
+      CLEAR: lv_start, lv_end, ls_output.
+
+      SELECT SINGLE gwldt, gwlen
+        FROM bgmkobj
+        INTO (@lv_start, @lv_end)
+        WHERE j_objnr = @ls_equi-objnr.
+
+      IF lv_start IS INITIAL OR lv_end IS INITIAL.
+        CONTINUE.
+      ENDIF.
+
+      ls_output-objektart = 'EQ'.
+      ls_output-nummer    = ls_equi-equnr.
+      ls_output-beginn    = lv_start.
+      ls_output-ende      = lv_end.
+
+      lv_days = lv_end - lv_today.
+      ls_output-resttage = lv_days.
+
+      IF lv_today >= lv_start AND lv_today <= lv_end.
+        ls_output-status = 'Gewährleistung vorhanden'.
+      ELSEIF lv_today > lv_end.
+        ls_output-status = 'Gewährleistung abgelaufen'.
+      ELSE.
+        ls_output-status = 'Gewährleistung noch nicht gültig'.
+      ENDIF.
+
+      " Nur innerhalb Restlaufzeit und nicht abgelaufen
+      IF lv_days >= 0 AND lv_days <= p_rest.
+        APPEND ls_output TO lt_output.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+  " --- LIST-Ausgabe ---
+  WRITE: / 'Objektart', 12 'Nummer', 32 'Beginn', 52 'Ende', 72 'Resttage', 82 'Status'.
+  ULINE.
+
+  LOOP AT lt_output INTO ls_output.
+    IF ls_output-status = 'Gewährleistung vorhanden'.
+      FORMAT COLOR COL_POSITIVE INTENSIFIED ON. " Grün
+    ELSEIF ls_output-resttage <= p_rest OR lv_today > ls_output-ende.
+      FORMAT COLOR COL_NEGATIVE INTENSIFIED ON. " Rot
+    ELSE.
+      FORMAT COLOR COL_NORMAL INTENSIFIED OFF.
+    ENDIF.
+
+    WRITE: / ls_output-objektart UNDER 'Objektart',
+             ls_output-nummer    UNDER 'Nummer',
+             ls_output-beginn    UNDER 'Beginn',
+             ls_output-ende      UNDER 'Ende',
+             ls_output-resttage  UNDER 'Resttage',
+             ls_output-status    UNDER 'Status'.
+
+    FORMAT COLOR OFF.
+  ENDLOOP.
+
+  " --- Prüfen, ob Mail nötig ---
+  lv_mail_needed = abap_false.
+  LOOP AT lt_output INTO ls_output.
+    IF ls_output-resttage < 90.
+      lv_mail_needed = abap_true.
+      EXIT.
+    ENDIF.
+  ENDLOOP.
+
+  " --- Mailversand ---
+  IF p_send = 'X' AND p_email IS NOT INITIAL AND lv_mail_needed = abap_true.
+    PERFORM send_email USING p_email lt_output.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* Mailversand
+*---------------------------------------------------------------------*
+FORM send_email USING pv_email TYPE ad_smtpadr pt_data TYPE STANDARD TABLE.
+  DATA: lv_body      TYPE string,
+        lv_line      TYPE string,
+        lt_mail_body TYPE soli_tab,
+        ls_mail_line TYPE soli.
+
+  lv_body = 'Gewährleistungen die in den nächsten 90 Tagen enden.:' && cl_abap_char_utilities=>cr_lf.
+
+  LOOP AT pt_data INTO ls_output.
+    lv_line = |{ ls_output-objektart } { ls_output-nummer } Beginn: { ls_output-beginn DATE = USER } Ende: { ls_output-ende DATE = USER } Resttage: { ls_output-resttage } Status: { ls_output-status }|.
+    CONCATENATE lv_body lv_line cl_abap_char_utilities=>cr_lf INTO lv_body.
+  ENDLOOP.
+
+  SPLIT lv_body AT cl_abap_char_utilities=>cr_lf INTO TABLE DATA(lt_lines).
+  LOOP AT lt_lines INTO DATA(lv_text).
+    ls_mail_line-line = lv_text.
+    APPEND ls_mail_line TO lt_mail_body.
+  ENDLOOP.
+
+  TRY.
+      DATA(lo_send_request) = cl_bcs=>create_persistent( ).
+      DATA(lo_document)     = cl_document_bcs=>create_document(
+                                i_type    = 'RAW'
+                                i_text    = lt_mail_body
+                                i_subject = 'SAP Systemnachricht: Gewährleistungen laufen aus.' ).
+      lo_send_request->set_document( lo_document ).
+      lo_send_request->add_recipient( cl_cam_address_bcs=>create_internet_address( pv_email ) ).
+      lo_send_request->set_send_immediately( 'X' ).
+      DATA(lv_sent) = lo_send_request->send( ).
+      IF lv_sent = abap_false.
+        MESSAGE 'Mail konnte nicht gesendet werden' TYPE 'E'.
+      ENDIF.
+      COMMIT WORK.
+    CATCH cx_document_bcs INTO DATA(lx_doc).
+      MESSAGE lx_doc->get_text( ) TYPE 'E'.
+  ENDTRY.
+ENDFORM.
