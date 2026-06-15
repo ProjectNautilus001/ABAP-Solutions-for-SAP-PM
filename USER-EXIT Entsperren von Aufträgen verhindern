@@ -1,0 +1,58 @@
+
+"=== 12/2025: Jahresabschluss Systemstatus SPER (I0043)
+"    Rücknahme nur durch ADMIN – Aktiv nur in den Monaten 11/12/01/02 ===
+
+" ---- Monatsfenster ohne Jahresbezug ---------------------------------------
+DATA: lv_mon TYPE n LENGTH 2.
+lv_mon = sy-datum+4(2).                 " '01'..'12' als 2-stellige Zahl
+
+" Aktiv in: Nov (11), Dez (12), Jan (01), Feb (02)
+IF lv_mon >= 11 OR lv_mon <= 2.
+
+  CONSTANTS: gc_admin_user TYPE syuname   VALUE 'dummy'.       " << USER
+  CONSTANTS: gc_sper_stat  TYPE jest-stat VALUE 'I0043'.         " Systemstatus SPER
+
+  DATA: lv_db_active  TYPE abap_bool VALUE abap_false,
+        lv_buf_active TYPE abap_bool VALUE abap_false.
+
+  " --- 1) SPER auf der DB aktiv?  (Puffer ignorieren)
+  CALL FUNCTION 'STATUS_CHECK'
+    EXPORTING
+      objnr         = caufvd_imp-objnr
+      status        = gc_sper_stat
+      bypass_buffer = 'X'                 " nur DB-Status
+    EXCEPTIONS
+      status_not_active = 1
+      object_not_found  = 2
+      OTHERS            = 3.
+  IF sy-subrc = 0.
+    lv_db_active = abap_true.
+  ENDIF.
+
+  " --- 2) SPER im Puffer (d. h. inkl. geplanter Änderungen) aktiv?
+  CALL FUNCTION 'STATUS_CHECK'
+    EXPORTING
+      objnr         = caufvd_imp-objnr
+      status        = gc_sper_stat
+      bypass_buffer = ' '                 " Puffer berücksichtigen
+    EXCEPTIONS
+      status_not_active = 1
+      object_not_found  = 2
+      OTHERS            = 3.
+  IF sy-subrc = 0.
+    lv_buf_active = abap_true.
+  ENDIF.
+
+  " --- 3) Entsperrung erkannt? (DB aktiv, Puffer NICHT aktiv) -> nur definierter User darf
+  IF lv_db_active = abap_true
+     AND lv_buf_active = abap_false
+     AND sy-uname <> gc_admin_user.
+
+    MESSAGE e013(zmm_kdext)
+      WITH caufvd_imp-aufnr 'SPER aufheben verboten – nur ADMIN dummy'.
+    EXIT.    " harter Abbruch des Speicherns
+  ENDIF.
+
+ENDIF.  " Monatsfenster 11/12/01/02
+
+"=== Ende SPER-Check beim Speichern ==========================================
