@@ -1,0 +1,87 @@
+* 28/08/2025 （づ￣3￣）づ╭❤️～
+* IF KST gesperrt, = Speichern nicht möglich.
+
+
+IF sy-uname = 'dummy'.
+  RETURN.
+ENDIF.
+
+
+DATA: lt_rules_db TYPE TABLE OF cobrb,
+      lt_rules_func TYPE TABLE OF cobrb,
+      ls_rule  TYPE cobrb,
+      lv_kostl TYPE kostl,
+      lt_cobra TYPE TABLE OF cobra.
+
+CALL FUNCTION 'K_SETTLEMENT_RULE_GET'
+  EXPORTING
+    objnr     = caufvd_imp-objnr
+    x_all     = 'X'
+  TABLES
+    e_cobra   = lt_cobra
+    e_cobrb   = lt_rules_func
+  EXCEPTIONS
+    not_found = 1
+    OTHERS    = 2.
+
+IF sy-subrc <> 0 OR lines( lt_rules_func ) = 0.
+  SELECT * FROM cobrb
+    INTO TABLE lt_rules_db
+    WHERE objnr = caufvd_imp-objnr.
+ENDIF.
+
+LOOP AT lt_rules_func INTO ls_rule WHERE kostl NE space.
+  lv_kostl = ls_rule-kostl.
+
+
+  SELECT SINGLE bkzks FROM csks
+    INTO @DATA(lv_bkzks)
+    WHERE kostl = @lv_kostl
+      AND datab <= @sy-datum
+      AND datbi >= @sy-datum.
+
+  IF sy-subrc = 0 AND lv_bkzks = 'X'.
+
+    CALL FUNCTION 'POPUP_DISPLAY_MESSAGE'
+      EXPORTING
+        titel = 'Kostenstelle gesperrt'
+        msgid = '00'
+        msgty = 'E'
+        msgno = '001'
+        msgv1 = 'Bitte Abrechnungsvorschrift korrigieren'.
+
+
+    MESSAGE e001(00) WITH 'Gesperrte Kostenstelle: ' lv_kostl
+                         ' Speichern nicht möglich! (* ￣︿￣)'.
+    EXIT.
+  ENDIF.
+ENDLOOP.
+
+IF lines( lt_rules_func ) = 0.
+  LOOP AT lt_rules_db INTO ls_rule WHERE kostl NE space.
+    lv_kostl = ls_rule-kostl.
+
+
+    SELECT SINGLE bkzks FROM csks
+      INTO @lv_bkzks
+      WHERE kostl = @lv_kostl
+        AND datab <= @sy-datum
+        AND datbi >= @sy-datum.
+
+    IF sy-subrc = 0 AND lv_bkzks = 'X'.
+
+      CALL FUNCTION 'POPUP_DISPLAY_MESSAGE'
+        EXPORTING
+          titel = 'Kostenstelle gesperrt'
+          msgid = '00'
+          msgty = 'E'
+          msgno = '001'
+          msgv1 = 'Bitte Abrechnungsvorschrift korrigieren'.
+
+
+      MESSAGE e001(00) WITH 'Gesperrte Kostenstelle: ' lv_kostl
+                           ' Speichern nicht möglich! (* ￣︿￣)'.
+      EXIT.
+    ENDIF.
+  ENDLOOP.
+ENDIF.
