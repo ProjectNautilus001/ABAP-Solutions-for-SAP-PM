@@ -1,0 +1,362 @@
+*---------------------------------------------------------------------*
+* Report:  Y_PM_ANLAGEN_STAMMDATEN_MASS
+*---------------------------------------------------------------------*
+* Beschreibung:
+*   Massenpflege des Anlagenhaupttextes (ANLA-TXA50) per CSV-Upload.
+*
+*   - Einlesen einer CSV-Datei (Format: ANLN1;TXA50)
+*   - Bereinigung der Daten (Leerzeichen, Sonderzeichen, Komma am Ende)
+*   - Automatische ALPHA-Konvertierung der Anlagennummer
+*   - Prüfung auf vorhandene Anlagen in ANLA
+*
+* Funktion:
+*   - Testmodus (p_test = X):
+*       --> Simulation ohne Datenänderung
+*   - Echtlauf:
+*       --> Direktes UPDATE auf Tabelle ANLA-Feld TXA50
+*
+* Annahmen:
+*   - BUKRS standardmäßig: 12
+*   - ANLN2 = 0000 (kein Unternummernkonzept)
+*
+* CSV-Format:
+*   ANLN1;TXA50
+*   Beispiel: 109330;Neuer Anlagentext
+*
+* Einschränkungen:
+*   - TXA50 ist auf 50 Zeichen begrenzt
+*   - Längere Texte werden automatisch gekürzt
+*
+* Autor:     Maverick
+* Erstellt:  18.06.2026
+*---------------------------------------------------------------------*
+
+REPORT y_pm_anlagen_stammdaten_mass.
+
+TYPES: BEGIN OF ty_file,
+         line TYPE string,
+       END OF ty_file.
+
+TYPES: BEGIN OF ty_upload,
+         line_no    TYPE i,
+         raw_anln1  TYPE c LENGTH 50,
+         anln1      TYPE anla-anln1,
+         anln2      TYPE anla-anln2,
+         txa50      TYPE anla-txa50,
+       END OF ty_upload.
+
+TYPES: BEGIN OF ty_log,
+         line_no    TYPE i,
+         raw_anln1  TYPE c LENGTH 50,
+         anln1      TYPE anla-anln1,
+         anln2      TYPE anla-anln2,
+         old_txa50  TYPE anla-txa50,
+         new_txa50  TYPE anla-txa50,
+         status     TYPE c LENGTH 12,
+         message    TYPE c LENGTH 255,
+       END OF ty_log.
+
+CONSTANTS: c_subnr TYPE anla-anln2 VALUE '0000',
+           c_sep   TYPE c VALUE ';'.
+
+DATA: gt_file   TYPE STANDARD TABLE OF ty_file WITH DEFAULT KEY,
+      gs_file   TYPE ty_file,
+      gt_upload TYPE STANDARD TABLE OF ty_upload WITH DEFAULT KEY,
+      gs_upload TYPE ty_upload,
+      gt_log    TYPE STANDARD TABLE OF ty_log WITH DEFAULT KEY,
+      gs_log    TYPE ty_log.
+
+DATA: gv_ok    TYPE i,
+      gv_test  TYPE i,
+      gv_error TYPE i,
+      gv_skip  TYPE i,
+      gv_total TYPE i,
+      gv_valid TYPE i.
+
+DATA: gt_filetab TYPE filetable,
+      gs_filetab LIKE LINE OF gt_filetab,
+      gv_rc      TYPE i,
+      gv_action  TYPE i,
+      gv_file    TYPE string.
+
+PARAMETERS: p_file  TYPE string OBLIGATORY LOWER CASE,
+            p_bukrs TYPE anla-bukrs DEFAULT '12' OBLIGATORY,
+            p_head  AS CHECKBOX,
+            p_test  AS CHECKBOX DEFAULT 'X'.
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_file.
+  PERFORM f4_file CHANGING p_file.
+
+START-OF-SELECTION.
+  PERFORM upload_file.
+  PERFORM parse_file.
+  PERFORM process_data.
+  PERFORM output_log.
+
+FORM f4_file CHANGING p_file TYPE string.
+  REFRESH gt_filetab.
+  CLEAR: gv_rc, gv_action, gs_filetab.
+
+  CALL METHOD cl_gui_frontend_services=>file_open_dialog
+    EXPORTING
+      default_extension = 'csv'
+      file_filter       = 'CSV (*.csv)|*.csv|Text (*.txt)|*.txt|Alle Dateien (*.*)|*.*|'
+    CHANGING
+      file_table        = gt_filetab
+      rc                = gv_rc
+      user_action       = gv_action
+    EXCEPTIONS
+      OTHERS            = 1.
+
+  IF sy-subrc = 0 AND gv_action = cl_gui_frontend_services=>action_ok AND gv_rc > 0.
+    READ TABLE gt_filetab INTO gs_filetab INDEX 1.
+    IF sy-subrc = 0.
+      p_file = gs_filetab-filename.
+    ENDIF.
+  ENDIF.
+ENDFORM.
+
+FORM upload_file.
+  REFRESH gt_file.
+  gv_file = p_file.
+
+  CALL METHOD cl_gui_frontend_services=>gui_upload
+    EXPORTING
+      filename            = gv_file
+      filetype            = 'ASC'
+      read_by_line        = 'X'
+      has_field_separator = ' '
+    CHANGING
+      data_tab            = gt_file
+    EXCEPTIONS
+      OTHERS              = 19.
+
+  IF sy-subrc <> 0.
+    MESSAGE e398(00) WITH 'Fehler beim Einlesen der Datei' p_file.
+  ENDIF.
+
+  IF gt_file IS INITIAL.
+    MESSAGE e398(00) WITH 'Die Datei enthaelt keine Daten'.
+  ENDIF.
+ENDFORM.
+
+FORM parse_file.
+  DATA: lv_line_no   TYPE i,
+        lv_raw_anln1 TYPE string,
+        lv_txa50_s   TYPE string,
+        lv_work      TYPE string,
+        lv_len       TYPE i,
+        lv_msg       TYPE string.
+
+  REFRESH gt_upload.
+  CLEAR gv_total.
+
+  LOOP AT gt_file INTO gs_file.
+    lv_line_no = sy-tabix.
+
+    IF p_head = 'X' AND lv_line_no = 1.
+      CONTINUE.
+    ENDIF.
+
+    CLEAR: gs_upload, gs_log, lv_raw_anln1, lv_txa50_s, lv_work, lv_len, lv_msg.
+    lv_work = gs_file-line.
+
+    IF lv_work IS INITIAL.
+      CONTINUE.
+    ENDIF.
+
+    PERFORM clean_string CHANGING lv_work.
+    SPLIT lv_work AT c_sep INTO lv_raw_anln1 lv_txa50_s.
+
+    PERFORM clean_string CHANGING lv_raw_anln1.
+    PERFORM clean_string CHANGING lv_txa50_s.
+
+    IF lv_raw_anln1 IS INITIAL.
+      gs_log-line_no = lv_line_no.
+      gs_log-anln2   = c_subnr.
+      gs_log-status  = 'ERROR'.
+      gs_log-message = 'Anlagennummer (ANLN1) fehlt'.
+      APPEND gs_log TO gt_log.
+      gv_error = gv_error + 1.
+      CONTINUE.
+    ENDIF.
+
+    IF lv_txa50_s IS INITIAL.
+      gs_log-line_no   = lv_line_no.
+      gs_log-raw_anln1 = lv_raw_anln1.
+      gs_log-anln2     = c_subnr.
+      gs_log-status    = 'ERROR'.
+      gs_log-message   = 'TXA50 fehlt'.
+      APPEND gs_log TO gt_log.
+      gv_error = gv_error + 1.
+      CONTINUE.
+    ENDIF.
+
+    lv_len = STRLEN( lv_txa50_s ).
+    IF lv_len > 50.
+      lv_msg = 'TXA50 war laenger als 50 Zeichen und wurde abgeschnitten'.
+      lv_txa50_s = substring( val = lv_txa50_s off = 0 len = 50 ).
+    ENDIF.
+
+    gs_upload-line_no   = lv_line_no.
+    gs_upload-raw_anln1 = lv_raw_anln1.
+    gs_upload-anln1     = lv_raw_anln1.
+    gs_upload-anln2     = c_subnr.
+    gs_upload-txa50     = lv_txa50_s.
+
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = gs_upload-anln1
+      IMPORTING
+        output = gs_upload-anln1.
+
+    APPEND gs_upload TO gt_upload.
+    gv_total = gv_total + 1.
+
+    IF lv_msg IS NOT INITIAL.
+      CLEAR gs_log.
+      gs_log-line_no   = lv_line_no.
+      gs_log-raw_anln1 = lv_raw_anln1.
+      gs_log-anln1     = gs_upload-anln1.
+      gs_log-anln2     = c_subnr.
+      gs_log-new_txa50 = gs_upload-txa50.
+      gs_log-status    = 'INFO'.
+      gs_log-message   = lv_msg.
+      APPEND gs_log TO gt_log.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.
+
+FORM process_data.
+  DATA: lv_old_txa50 TYPE anla-txa50.
+
+  LOOP AT gt_upload INTO gs_upload.
+    CLEAR: gs_log, lv_old_txa50.
+
+    gs_log-line_no   = gs_upload-line_no.
+    gs_log-raw_anln1 = gs_upload-raw_anln1.
+    gs_log-anln1     = gs_upload-anln1.
+    gs_log-anln2     = gs_upload-anln2.
+    gs_log-new_txa50 = gs_upload-txa50.
+
+    SELECT SINGLE txa50
+      INTO lv_old_txa50
+      FROM anla
+      WHERE bukrs = p_bukrs
+        AND anln1 = gs_upload-anln1
+        AND anln2 = gs_upload-anln2.
+
+    IF sy-subrc <> 0.
+      gs_log-status  = 'ERROR'.
+      gs_log-message = 'Anlage in ANLA nicht gefunden'.
+      APPEND gs_log TO gt_log.
+      gv_error = gv_error + 1.
+      CONTINUE.
+    ENDIF.
+
+    gs_log-old_txa50 = lv_old_txa50.
+    gv_valid = gv_valid + 1.
+
+    IF lv_old_txa50 = gs_upload-txa50.
+      gs_log-status  = 'SKIP'.
+      gs_log-message = 'Keine Aenderung noetig; alter und neuer Wert sind identisch'.
+      APPEND gs_log TO gt_log.
+      gv_skip = gv_skip + 1.
+      CONTINUE.
+    ENDIF.
+
+    IF p_test = 'X'.
+      gs_log-status  = 'TEST'.
+      gs_log-message = 'Testmodus: UPDATE ANLA-TXA50 wuerde ausgefuehrt'.
+      APPEND gs_log TO gt_log.
+      gv_test = gv_test + 1.
+      CONTINUE.
+    ENDIF.
+
+    UPDATE anla
+      SET txa50 = gs_upload-txa50
+      WHERE bukrs = p_bukrs
+        AND anln1 = gs_upload-anln1
+        AND anln2 = gs_upload-anln2.
+
+    IF sy-subrc <> 0.
+      ROLLBACK WORK.
+      gs_log-status  = 'ERROR'.
+      gs_log-message = 'UPDATE auf ANLA-TXA50 fehlgeschlagen'.
+      APPEND gs_log TO gt_log.
+      gv_error = gv_error + 1.
+      CONTINUE.
+    ENDIF.
+
+    COMMIT WORK AND WAIT.
+
+    gs_log-status  = 'OK'.
+    gs_log-message = 'ANLA-TXA50 erfolgreich geaendert'.
+    APPEND gs_log TO gt_log.
+    gv_ok = gv_ok + 1.
+  ENDLOOP.
+ENDFORM.
+
+FORM clean_string CHANGING p_value TYPE string.
+  DATA: lv_len  TYPE i,
+        lv_idx  TYPE i,
+        lv_last TYPE string.
+
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>cr_lf IN p_value WITH ''.
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline IN p_value WITH ''.
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>horizontal_tab IN p_value WITH ' '.
+  REPLACE ALL OCCURRENCES OF '"' IN p_value WITH ''.
+  SHIFT p_value LEFT DELETING LEADING space.
+  SHIFT p_value RIGHT DELETING TRAILING space.
+
+  lv_len = STRLEN( p_value ).
+  IF lv_len > 0.
+    lv_idx = lv_len - 1.
+    lv_last = substring( val = p_value off = lv_idx len = 1 ).
+    IF lv_last = ','.
+      p_value = substring( val = p_value off = 0 len = lv_idx ).
+      SHIFT p_value RIGHT DELETING TRAILING space.
+    ENDIF.
+  ENDIF.
+ENDFORM.
+
+FORM output_log.
+  DATA: lv_mode TYPE c LENGTH 20.
+
+  IF p_test = 'X'.
+    lv_mode = 'TESTMODUS'.
+  ELSE.
+    lv_mode = 'ECHTLAUF'.
+  ENDIF.
+
+  ULINE.
+  WRITE: / 'Report: Massenpflege ANLA-TXA50 per Direktupdate'.
+  WRITE: / 'Modus :', lv_mode.
+  WRITE: / 'Datei :', p_file.
+  WRITE: / 'BUKRS :', p_bukrs.
+  WRITE: / 'ANLN2 :', c_subnr.
+  ULINE.
+  WRITE: / 'CSV-Datensaetze            :', gv_total,
+         / 'Davon fachlich/pruefbar    :', gv_valid,
+         / 'Erfolgreich geaendert      :', gv_ok,
+         / 'Im Testmodus markiert      :', gv_test,
+         / 'Uebersprungen             :', gv_skip,
+         / 'Fehler                    :', gv_error.
+  ULINE.
+
+  FORMAT COLOR COL_HEADING INTENSIFIED ON.
+  WRITE: / 'Zeile', 8 'ANLN1 (CSV)', 28 'ANLN1 intern', 49 'Alt TXA50',
+           102 'Neu TXA50', 155 'Status', 168 'Meldung'.
+  FORMAT RESET.
+  ULINE.
+
+  LOOP AT gt_log INTO gs_log.
+    WRITE: / gs_log-line_no,
+             8  gs_log-raw_anln1,
+             28 gs_log-anln1,
+             49 gs_log-old_txa50,
+             102 gs_log-new_txa50,
+             155 gs_log-status,
+             168 gs_log-message.
+  ENDLOOP.
+ENDFORM.
