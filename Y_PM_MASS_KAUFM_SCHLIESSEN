@@ -1,0 +1,234 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_MASS_KAUFM_SCHLIESSEN
+*&---------------------------------------------------------------------*
+*& Der Report dient zum massenhaften kaufmännischen Abschluss bzw.
+*& zur Rücknahme des kaufmännischen Abschlusses von
+*& Instandhaltungsaufträgen.
+*&
+*& Es werden optional Aufträge eines Jahres oder eine einzelne
+*& Auftragsnummer selektiert. Abhängig vom gewählten Modus werden:
+*&  - technisch abgeschlossene (TECO) aber noch nicht kaufmännisch
+*&    abgeschlossene Aufträge verarbeitet (COMPLETE_BUSINESS)
+*&  - bereits kaufmännisch abgeschlossene Aufträge selektiert und
+*&    deren Abschluss zurückgenommen (CANCEL_BUSINESS_COMPLETION)
+*&
+*& Der Abschluss erfolgt über den Funktionsbaustein
+*& BAPI_ALM_ORDER_MAINTAIN unter Verwendung der Methoden
+*& COMPLETE_BUSINESS bzw. CANCEL_BUSINESS_COMPLETION inkl. SAVE
+*& und anschließendem COMMIT.
+*&
+*& Der Report unterstützt sowohl Testläufe (Simulation) als auch
+*& produktive Läufe zur Massenverarbeitung historischer Aufträge.
+
+*&
+*& Author     : Maverick
+*& date       : 17.06.2026
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*----------------------------------------------------------------------*
+* Änderungshistorie                                                    *
+* Datum      Benutzer:                  Grund                          *
+* ---------- ----------------- --------------------------------------- *
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+
+REPORT Y_PM_MASS_KAUFM_SCHLIESSEN.
+
+PARAMETERS: p_days TYPE i DEFAULT 365.
+PARAMETERS: p_test AS CHECKBOX DEFAULT 'X'.
+PARAMETERS: p_year TYPE gjahr.
+PARAMETERS: p_set   AS CHECKBOX DEFAULT 'X'.
+PARAMETERS: p_rueck AS CHECKBOX.
+PARAMETERS: p_aufnr TYPE aufk-aufnr.
+
+*DATA
+TYPES: BEGIN OF ty_order,
+         aufnr TYPE aufk-aufnr,
+         auart TYPE aufk-auart,
+         werks TYPE aufk-werks,
+         erdat TYPE aufk-erdat,
+         objnr TYPE jest-objnr,
+       END OF ty_order.
+
+DATA: gt_orders TYPE STANDARD TABLE OF ty_order,
+      gs_order  TYPE ty_order.
+
+DATA: lv_days  TYPE i,
+      lv_year  TYPE gjahr,
+      lv_aufnr TYPE aufk-aufnr.
+
+DATA: ls_jest TYPE jest.
+
+DATA: lt_methods TYPE STANDARD TABLE OF bapi_alm_order_method,
+      ls_methods TYPE bapi_alm_order_method,
+      lt_header  TYPE STANDARD TABLE OF bapi_alm_order_headers_i,
+      ls_header  TYPE bapi_alm_order_headers_i,
+      lt_return  TYPE STANDARD TABLE OF bapiret2,
+      ls_return  TYPE bapiret2.
+
+*SELEKTION
+START-OF-SELECTION.
+
+  IF p_set = 'X' AND p_rueck = 'X'.
+    MESSAGE 'Bitte nur eine Option wählen: Setzen oder Rücknahme.' TYPE 'E'.
+  ENDIF.
+
+  IF p_set = '' AND p_rueck = ''.
+    MESSAGE 'Bitte eine Option wählen: Setzen oder Rücknahme.' TYPE 'E'.
+  ENDIF.
+
+  SELECT aufnr auart werks erdat objnr
+    INTO gs_order
+    FROM aufk
+    WHERE loekz = ''.
+
+    IF NOT p_aufnr IS INITIAL.
+      IF gs_order-aufnr <> p_aufnr.
+        CONTINUE.
+      ENDIF.
+    ENDIF.
+
+    lv_year = gs_order-erdat+0(4).
+
+    IF NOT p_year IS INITIAL.
+      IF lv_year <> p_year.
+        CONTINUE.
+      ENDIF.
+    ENDIF.
+
+    lv_days = sy-datum - gs_order-erdat.
+    IF lv_days < p_days.
+      CONTINUE.
+    ENDIF.
+
+    IF p_set = 'X'.
+
+      CLEAR ls_jest.
+      SELECT SINGLE *
+        FROM jest
+        INTO ls_jest
+        WHERE objnr = gs_order-objnr
+          AND stat  = 'I0045'
+          AND inact = ''.
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
+
+      CLEAR ls_jest.
+      SELECT SINGLE *
+        FROM jest
+        INTO ls_jest
+        WHERE objnr = gs_order-objnr
+          AND stat  = 'I0046'
+          AND inact = ''.
+      IF sy-subrc = 0.
+        CONTINUE.
+      ENDIF.
+
+    ENDIF.
+
+    IF p_rueck = 'X'.
+
+      CLEAR ls_jest.
+      SELECT SINGLE *
+        FROM jest
+        INTO ls_jest
+        WHERE objnr = gs_order-objnr
+          AND stat  = 'I0046'
+          AND inact = ''.
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
+
+    ENDIF.
+
+    APPEND gs_order TO gt_orders.
+
+  ENDSELECT.
+
+*AUSGABE TEST LISTE
+WRITE: / 'Gefundene Aufträge:', lines( gt_orders ).
+WRITE: / 'Testlauf:', p_test.
+WRITE: / 'Jahr:', p_year.
+WRITE: / 'Einzelauftrag:', p_aufnr.
+IF p_set = 'X'.
+  WRITE: / 'Modus: Kaufm. Abschluss setzen'.
+ENDIF.
+IF p_rueck = 'X'.
+  WRITE: / 'Modus: Kaufm. Abschluss zurücknehmen'.
+ENDIF.
+WRITE: / '------------------------------------------'.
+
+LOOP AT gt_orders INTO gs_order.
+  WRITE: / gs_order-aufnr, gs_order-auart, gs_order-werks, gs_order-erdat.
+ENDLOOP.
+
+* BAPI_ALM_ORDER_MAINTAIN
+IF p_test IS INITIAL.
+
+  LOOP AT gt_orders INTO gs_order.
+
+    CLEAR: lt_methods, lt_header, lt_return,
+           ls_methods, ls_header, ls_return.
+
+    lv_aufnr = gs_order-aufnr.
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = lv_aufnr
+      IMPORTING
+        output = lv_aufnr.
+
+    ls_header-orderid = lv_aufnr.
+    APPEND ls_header TO lt_header.
+
+    ls_methods-refnumber  = '000001'.
+    ls_methods-objecttype = 'HEADER'.
+    IF p_set = 'X'.
+      ls_methods-method = 'COMPLETE_BUSINESS'.
+    ENDIF.
+    IF p_rueck = 'X'.
+      ls_methods-method = 'CANCEL_BUSINESS_COMPLETION'.
+    ENDIF.
+    ls_methods-objectkey  = lv_aufnr.
+    APPEND ls_methods TO lt_methods.
+
+    CLEAR ls_methods.
+    ls_methods-refnumber  = '000000'.
+    ls_methods-objecttype = ''.
+    ls_methods-method     = 'SAVE'.
+    ls_methods-objectkey  = ''.
+    APPEND ls_methods TO lt_methods.
+
+    CALL FUNCTION 'BAPI_ALM_ORDER_MAINTAIN'
+      TABLES
+        it_methods = lt_methods
+        it_header  = lt_header
+        return     = lt_return.
+
+    CLEAR ls_return.
+    READ TABLE lt_return INTO ls_return WITH KEY type = 'E'.
+    IF sy-subrc <> 0.
+      READ TABLE lt_return INTO ls_return WITH KEY type = 'A'.
+    ENDIF.
+
+    IF sy-subrc = 0.
+      CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+      WRITE: / 'Fehler bei Auftrag:', lv_aufnr, ls_return-message.
+    ELSE.
+      CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+        EXPORTING
+          wait = 'X'.
+      IF p_set = 'X'.
+        WRITE: / 'Kaufm. abgeschlossen:', lv_aufnr.
+      ENDIF.
+      IF p_rueck = 'X'.
+        WRITE: / 'Kaufm. Abschluss zurueckgenommen:', lv_aufnr.
+      ENDIF.
+    ENDIF.
+
+  ENDLOOP.
+
+ELSE.
+  WRITE: / 'Nur Testlauf - keine Änderungen'.
+ENDIF.
