@@ -1,0 +1,310 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_RISTRA_LOG_MONITOR
+*&---------------------------------------------------------------------*
+*& Zweck:
+*&   Tägliche Überwachung der Anwendungslogs (SLG1) des Programms
+*&   RISTRA20 (Objekt IBIP - Anwendungslog Funktionsgruppe IBIP).
+*&   Wertet den Zeitraum von 00:00:00 bis 23:59:59 des aktuellen
+*&   (bzw. per Selektion angegebenen) Tages aus und verschickt eine
+*&   Zusammenfassung per E-Mail.
+*&
+*&   Läuft als periodischer Hintergrundjob (SM36), kein Customizing,
+*&   keine Z-Tabelle notwendig.
+*&---------------------------------------------------------------------*
+*& Author     : Student, Christian
+*& date       : 18.08.2026
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*----------------------------------------------------------------------*
+* Änderungshistorie                                                    *
+* Datum      Benutzer:                  Grund                          *
+* ---------- ----------------- --------------------------------------- *
+*&---------------------------------------------------------------------*
+
+REPORT Y_PM_RISTRA_LOG_MONITOR.
+
+*----------------------------------------------------------------------*
+* Selektionsbild
+*----------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
+PARAMETERS: p_obj   TYPE balobj_d  DEFAULT 'IBIP'      OBLIGATORY,
+            p_subobj TYPE balsubobj DEFAULT ''         .   " optional, meist leer
+PARAMETERS: p_prog  TYPE sy-repid DEFAULT 'RISTRA20' OBLIGATORY.
+SELECTION-SCREEN END OF BLOCK b1.
+
+SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-002.
+PARAMETERS: p_email TYPE ad_smtpadr OBLIGATORY.               " Mailempfänger
+PARAMETERS: p_ccmail TYPE ad_smtpadr.                          " optionaler CC
+PARAMETERS: p_allok  TYPE flag AS CHECKBOX DEFAULT 'X'.        " auch bei 0 Fehlern Mail senden
+SELECTION-SCREEN END OF BLOCK b2.
+
+*----------------------------------------------------------------------*
+* Textelemente (falls im System nicht per SE38 gepflegt, hier Default)
+* TEXT-001 = 'Anwendungslog-Selektion'
+* TEXT-002 = 'Mailversand'
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+* Typen / Datendeklaration
+*----------------------------------------------------------------------*
+TYPES: BEGIN OF ty_msg_flat,
+         log_handle TYPE balloghndl,
+         extnumber  TYPE balnrext,
+         msgty      TYPE symsgty,
+         probclass  TYPE balprobcl,
+         time_stmp  TYPE bal_s_msg-time_stmp,
+         msg_text   TYPE bal_s_msg-msgty,
+         langtext   TYPE flag,
+       END OF ty_msg_flat.
+
+DATA: lt_log_filter TYPE bal_s_lfil,
+      lt_log_header TYPE balhdr_t,
+      lt_log_handle TYPE bal_t_logh,
+      lt_msg_handle TYPE bal_t_msgh,
+      ls_msg_handle TYPE balmsghndl,
+      ls_msg        TYPE bal_s_msg,
+      lt_ausgabe    TYPE TABLE OF ty_msg_flat,
+      ls_ausgabe    TYPE ty_msg_flat.
+
+DATA: lv_von_datum TYPE d,
+      lv_bis_datum TYPE d,
+      lv_von_zeit  TYPE t,
+      lv_bis_zeit  TYPE t.
+
+DATA: lv_cnt_s TYPE i, lv_cnt_w TYPE i, lv_cnt_e TYPE i,
+      lv_cnt_a TYPE i, lv_cnt_i TYPE i, lv_cnt_gesamt TYPE i.
+
+DATA: lv_max_probclass TYPE balprobcl VALUE 9. " 9 = keine gefunden
+
+DATA: gv_datum TYPE sy-datum. " Auswertungsdatum: immer der aktuelle Tag (wird in ZEITRAUM_ERMITTELN gesetzt)
+
+*----------------------------------------------------------------------*
+* START-OF-SELECTION
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+  PERFORM zeitraum_ermitteln.
+  PERFORM logs_selektieren.
+  PERFORM meldungen_auswerten.
+  PERFORM mail_versenden.
+
+*&---------------------------------------------------------------------*
+*&      Form  ZEITRAUM_ERMITTELN
+*&---------------------------------------------------------------------*
+*&  Fixer Tagesausschnitt: 00:00:00 - 23:59:59 des Selektionsdatums
+*&---------------------------------------------------------------------*
+FORM zeitraum_ermitteln.
+  gv_datum     = sy-datum.
+  lv_von_datum = gv_datum.
+  lv_bis_datum = gv_datum.
+  lv_von_zeit  = '000000'.
+  lv_bis_zeit  = '235959'.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  LOGS_SELEKTIEREN
+*&---------------------------------------------------------------------*
+*&  Liest alle Logköpfe + Meldungen zu Objekt/Programm/Zeitraum
+*&---------------------------------------------------------------------*
+FORM logs_selektieren.
+
+  CLEAR lt_log_filter.
+
+  " Objekt (IBIP)
+  IF p_obj IS NOT INITIAL.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = p_obj ) TO lt_log_filter-object.
+  ENDIF.
+
+  " Unterobjekt (optional, im Beispiel leer -> nicht einschränken)
+  IF p_subobj IS NOT INITIAL.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = p_subobj ) TO lt_log_filter-subobject.
+  ENDIF.
+
+  " Programm, das den Log erzeugt hat (Range-Tabelle ALPROG)
+  IF p_prog IS NOT INITIAL.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = p_prog ) TO lt_log_filter-alprog.
+  ENDIF.
+
+  " Zeitraum "angelegt am/um" - in diesem System sind ALDATE/ALTIME
+  " selbst Range-Tabellen (keine Kurzform-Felder DATE_FROM/TIME_FROM
+  " vorhanden), daher hier mit Option BT (between) befüllen.
+  APPEND VALUE #( sign = 'I' option = 'BT' low = lv_von_datum high = lv_bis_datum ) TO lt_log_filter-aldate.
+  APPEND VALUE #( sign = 'I' option = 'BT' low = lv_von_zeit  high = lv_bis_zeit  ) TO lt_log_filter-altime.
+
+  CALL FUNCTION 'BAL_DB_SEARCH'
+    EXPORTING
+      i_s_log_filter        = lt_log_filter
+    IMPORTING
+      e_t_log_header        = lt_log_header
+    EXCEPTIONS
+      log_not_found         = 1
+      OTHERS                = 2.
+
+  IF lt_log_header IS INITIAL.
+    " keine Logs im Zeitraum gefunden -> trotzdem sauber Mail mit "keine Daten" verschicken
+    RETURN.
+  ENDIF.
+
+  CALL FUNCTION 'BAL_DB_LOAD'
+    EXPORTING
+      i_t_log_header = lt_log_header
+    IMPORTING
+      e_t_log_handle = lt_log_handle
+      e_t_msg_handle = lt_msg_handle
+    EXCEPTIONS
+      no_logs_specified  = 1
+      log_not_found      = 2
+      log_already_loaded = 3
+      OTHERS              = 4.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  MELDUNGEN_AUSWERTEN
+*&---------------------------------------------------------------------*
+*&  Zählt Meldungstypen, ermittelt höchste Problemklasse,
+*&  sammelt Fehler/Abbrüche/Warnungen für den Mailtext
+*&---------------------------------------------------------------------*
+FORM meldungen_auswerten.
+
+  LOOP AT lt_msg_handle INTO ls_msg_handle.
+
+    CALL FUNCTION 'BAL_LOG_MSG_READ'
+      EXPORTING
+        i_s_msg_handle = ls_msg_handle
+      IMPORTING
+        e_s_msg        = ls_msg
+      EXCEPTIONS
+        OTHERS         = 1.
+
+    IF sy-subrc <> 0.
+      CONTINUE.
+    ENDIF.
+
+    ADD 1 TO lv_cnt_gesamt.
+
+    CASE ls_msg-msgty.
+      WHEN 'S'. ADD 1 TO lv_cnt_s.
+      WHEN 'W'. ADD 1 TO lv_cnt_w.
+      WHEN 'E'. ADD 1 TO lv_cnt_e.
+      WHEN 'A'. ADD 1 TO lv_cnt_a.
+      WHEN 'I'. ADD 1 TO lv_cnt_i.
+    ENDCASE.
+
+    " kleinste Zahl = höchste Priorität (1 = sehr wichtig)
+    IF ls_msg-probclass IS NOT INITIAL AND ls_msg-probclass < lv_max_probclass.
+      lv_max_probclass = ls_msg-probclass.
+    ENDIF.
+
+    " Nur Fehler/Abbrüche/Warnungen für den Detailteil der Mail sammeln
+    IF ls_msg-msgty CA 'EAW'.
+      CLEAR ls_ausgabe.
+      ls_ausgabe-log_handle = ls_msg_handle-log_handle.
+      ls_ausgabe-msgty      = ls_msg-msgty.
+      ls_ausgabe-probclass  = ls_msg-probclass.
+      APPEND ls_ausgabe TO lt_ausgabe.
+    ENDIF.
+
+  ENDLOOP.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  MAIL_VERSENDEN
+*&---------------------------------------------------------------------*
+*&  Baut HTML-Mailtext und verschickt ihn per CL_BCS
+*&---------------------------------------------------------------------*
+FORM mail_versenden.
+
+  DATA: lt_body      TYPE bcsy_text,
+        lv_line      TYPE soli-line,
+        lv_betreff   TYPE so_obj_des,
+        lv_ampel     TYPE string.
+
+  DATA: lo_send_request TYPE REF TO cl_bcs,
+        lo_document     TYPE REF TO cl_document_bcs,
+        lo_recipient    TYPE REF TO if_recipient_bcs,
+        lx_bcs          TYPE REF TO cx_bcs.
+
+  " --- Wenn keine Probleme und "auch bei OK senden" deaktiviert -> abbrechen
+  IF lv_cnt_e = 0 AND lv_cnt_a = 0 AND lv_cnt_w = 0 AND p_allok IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  " --- Ampel/Betreff nach Schwere
+  IF lv_cnt_a > 0.
+    lv_ampel   = 'ROT'.
+    lv_betreff = |RISTRA20 Log-Check { gv_datum DATE = USER }: ABBRUCH aufgetreten|.
+  ELSEIF lv_cnt_e > 0.
+    lv_ampel   = 'ROT'.
+    lv_betreff = |RISTRA20 Log-Check { gv_datum DATE = USER }: FEHLER aufgetreten|.
+  ELSEIF lv_cnt_w > 0.
+    lv_ampel   = 'GELB'.
+    lv_betreff = |RISTRA20 Log-Check { gv_datum DATE = USER }: Warnungen vorhanden|.
+  ELSE.
+    lv_ampel   = 'GRUEN'.
+    lv_betreff = |RISTRA20 Log-Check { gv_datum DATE = USER }: OK, keine Probleme|.
+  ENDIF.
+
+  " --- Mailtext
+  APPEND |RISTRA20 – Anwendungslog-Auswertung (SLG1)| TO lt_body.
+  APPEND |Objekt: { p_obj }   Programm: { p_prog }| TO lt_body.
+  APPEND |Zeitraum: { gv_datum DATE = USER } 00:00:00 - 23:59:59| TO lt_body.
+  APPEND '' TO lt_body.
+  APPEND |Status: { lv_ampel }| TO lt_body.
+  APPEND '' TO lt_body.
+  APPEND |Anzahl Meldungen gesamt : { lv_cnt_gesamt }| TO lt_body.
+  APPEND |  davon Erfolg      (S) : { lv_cnt_s }| TO lt_body.
+  APPEND |  davon Info        (I) : { lv_cnt_i }| TO lt_body.
+  APPEND |  davon Warnung     (W) : { lv_cnt_w }| TO lt_body.
+  APPEND |  davon Fehler      (E) : { lv_cnt_e }| TO lt_body.
+  APPEND |  davon Abbruch     (A) : { lv_cnt_a }| TO lt_body.
+
+  IF lv_max_probclass <> 9.
+    APPEND |Höchste Problemklasse : { lv_max_probclass }| TO lt_body.
+  ENDIF.
+
+  APPEND '' TO lt_body.
+
+  IF lines( lt_ausgabe ) > 0.
+    APPEND 'Details (Fehler/Abbruch/Warnung):' TO lt_body.
+    APPEND '----------------------------------' TO lt_body.
+    LOOP AT lt_ausgabe INTO ls_ausgabe.
+      APPEND |Typ { ls_ausgabe-msgty }  Problemklasse { ls_ausgabe-probclass }| TO lt_body.
+    ENDLOOP.
+    APPEND '' TO lt_body.
+    APPEND 'Bitte Details direkt in Transaktion SLG1 pruefen' TO lt_body.
+    APPEND |(Objekt { p_obj }, Programm { p_prog }, Datum { gv_datum DATE = USER }).| TO lt_body.
+  ELSE.
+    APPEND 'Keine Fehler, Abbrüche oder Warnungen im Zeitraum gefunden.' TO lt_body.
+  ENDIF.
+
+  TRY.
+      lo_send_request = cl_bcs=>create_persistent( ).
+
+      lo_document = cl_document_bcs=>create_document(
+                       i_type    = 'RAW'
+                       i_text    = lt_body
+                       i_subject = lv_betreff ).
+
+      lo_send_request->set_document( lo_document ).
+
+      lo_recipient = cl_cam_address_bcs=>create_internet_address( p_email ).
+      lo_send_request->add_recipient( i_recipient = lo_recipient ).
+
+      IF p_ccmail IS NOT INITIAL.
+        lo_recipient = cl_cam_address_bcs=>create_internet_address( p_ccmail ).
+        lo_send_request->add_recipient( i_recipient = lo_recipient i_copy = 'X' ).
+      ENDIF.
+
+      lo_send_request->set_send_immediately( abap_true ).
+      lo_send_request->send( ).
+
+      COMMIT WORK.
+
+    CATCH cx_bcs INTO lx_bcs.
+      WRITE: / 'Fehler beim Mailversand:', lx_bcs->get_text( ).
+  ENDTRY.
+
+ENDFORM.
