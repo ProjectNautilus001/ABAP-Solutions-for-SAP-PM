@@ -1,0 +1,137 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_IW38_EXP
+*&---------------------------------------------------------------------*
+*& Exportiert Meldungsliste aus IW38 (Variante STÖRMELDUNG) im Batch
+*&---------------------------------------------------------------------*
+*& Author     : Student, Christian
+*& Date       : 13.10.2025
+*&---------------------------------------------------------------------*
+REPORT Y_PM_IW38_EXP.
+
+TYPES: list_ascii TYPE c LENGTH 2000.
+
+TYPES: BEGIN OF ty_text_line,
+         line TYPE c LENGTH 1000,
+       END OF ty_text_line.
+
+DATA: lv_filename     TYPE string,
+      lt_list         TYPE TABLE OF abaplist,
+      lt_text         TYPE TABLE OF ty_text_line,
+      lt_ascii        TYPE STANDARD TABLE OF list_ascii WITH DEFAULT KEY,
+      lv_ascii_line   TYPE list_ascii,
+      lv_text         TYPE ty_text_line,
+      lv_msg          TYPE string,
+      lv_dir_len      TYPE i,
+      lv_last_char    TYPE c LENGTH 1.
+
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
+PARAMETERS:
+  p_test TYPE c AS CHECKBOX DEFAULT abap_false USER-COMMAND test,
+  p_dir  TYPE string LOWER CASE.
+SELECTION-SCREEN END OF BLOCK b1.
+
+START-OF-SELECTION.
+
+  " Sicherstellen, dass das Verzeichnis mit Backslash endet
+  lv_dir_len = STRLEN( p_dir ).
+  IF lv_dir_len > 0.
+    lv_last_char = p_dir+lv_dir_len - 1.
+    IF lv_last_char <> '\'.
+      CONCATENATE p_dir '\' INTO p_dir.
+    ENDIF.
+  ENDIF.
+
+  " Dateinamen zusammensetzen
+  lv_filename = p_dir && 'IW38 SAP Liste Aufträge.txt'.
+
+  PERFORM export_report_to_txt.
+
+FORM export_report_to_txt.
+  DATA: lv_subrc TYPE sy-subrc.
+
+  SUBMIT riaufk20 USING SELECTION-SET 'STÖRMELDUNG'
+                 EXPORTING LIST TO MEMORY
+                 AND RETURN.
+
+  " Ergebnisliste aus Speicher lesen
+  CALL FUNCTION 'LIST_FROM_MEMORY'
+    TABLES
+      listobject = lt_list
+    EXCEPTIONS
+      not_found  = 1
+      OTHERS     = 2.
+  IF sy-subrc <> 0.
+    MESSAGE 'Fehler beim Lesen der Ergebnisliste aus Speicher' TYPE 'E'.
+    RETURN.
+  ENDIF.
+
+  PERFORM convert_list_to_text.
+
+  IF p_test = abap_true.
+    PERFORM display_preview.
+    RETURN.
+  ENDIF.
+
+  PERFORM create_txt_file.
+ENDFORM.
+
+FORM convert_list_to_text.
+  CLEAR: lt_ascii, lt_text.
+
+  CALL FUNCTION 'LIST_TO_ASCI'
+    TABLES
+      listasci   = lt_ascii
+      listobject = lt_list
+    EXCEPTIONS
+      empty_list = 1
+      list_index_invalid = 2
+      OTHERS     = 3.
+
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE 'E' NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    RETURN.
+  ENDIF.
+
+  LOOP AT lt_ascii INTO lv_ascii_line.
+    lv_text-line = lv_ascii_line.
+    APPEND lv_text TO lt_text.
+  ENDLOOP.
+ENDFORM.
+
+FORM display_preview.
+  WRITE: / 'Testmodus - Vorschau der zu exportierenden Daten:'.
+  WRITE: / 'Zieldatei:', lv_filename.
+  ULINE.
+
+  LOOP AT lt_text INTO lv_text.
+    WRITE: / lv_text-line.
+  ENDLOOP.
+ENDFORM.
+
+FORM create_txt_file.
+
+  DATA: lv_date_line TYPE string.
+
+  OPEN DATASET lv_filename FOR OUTPUT IN TEXT MODE ENCODING DEFAULT
+    MESSAGE lv_msg
+    IGNORING CONVERSION ERRORS.
+  IF sy-subrc <> 0.
+    MESSAGE |Fehler beim Öffnen der Datei: { lv_msg }| TYPE 'E'.
+    RETURN.
+  ENDIF.
+
+  " Erste Zeile mit Erstellungsdatum hinzufügen
+  lv_date_line = |Stand: { sy-datum+6(2) }.{ sy-datum+4(2) }.{ sy-datum(4) }|.
+  TRANSFER lv_date_line TO lv_filename.
+
+  LOOP AT lt_text INTO lv_text.
+    IF lv_text-line IS NOT INITIAL.
+      TRANSFER lv_text-line TO lv_filename.
+    ENDIF.
+  ENDLOOP.
+
+  CLOSE DATASET lv_filename.
+
+  MESSAGE |Hat alles hingehaun! : { lv_filename }| TYPE 'S'.
+ENDFORM.
