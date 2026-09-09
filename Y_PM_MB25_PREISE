@@ -1,0 +1,209 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_MB25_PREISE
+*&---------------------------------------------------------------------*
+*& MB25 Liste mit Preisen und Autragsart, Funktionalität über LDB
+*&
+*& Author : Student, Christian
+*& date   : 06.03.2026
+*& kind of p. : Report (x) Batch-Input ( ) Include ( )
+*&               Sonstiges/others ( ) Modulpool ( )
+*&---------------------------------------------------------------------*
+*& Änderungshistorie
+*& Datum      Benutzer   Grund
+*---------------------------------------------------------------------*
+REPORT Y_PM_MB25_PREISE.
+
+TYPE-POOLS: slis.
+
+NODES: rkpf, resb.
+
+PARAMETERS: p_lang TYPE spras DEFAULT sy-langu.
+
+CONSTANTS: c_bwkey TYPE bwkey VALUE '120',
+           c_bukrs TYPE bukrs VALUE '12'.
+
+*  Typen
+TYPES: BEGIN OF ty_out,
+         rsnum  TYPE resb-rsnum,
+         bdter  TYPE resb-bdter,
+         gel    TYPE resb-enmng,
+         matnr  TYPE resb-matnr,
+         bdmng  TYPE resb-bdmng,
+         diffmg TYPE resb-bdmng,
+         meins  TYPE resb-meins,
+         rsart  TYPE resb-rsart,
+         kont   TYPE char20,
+         maktx  TYPE makt-maktx,
+         bwart  TYPE resb-bwart,
+         rst    TYPE char1,
+         aufnr  TYPE resb-aufnr,
+         auart  TYPE aufk-auart,
+         enmng  TYPE resb-enmng,
+         menge  TYPE resb-bdmng,
+         verpr  TYPE mbew-verpr,
+         waers  TYPE t001-waers,
+         wert   TYPE bseg-dmbtr,
+         lgort  TYPE resb-lgort,
+       END OF ty_out.
+
+DATA: gt_out   TYPE STANDARD TABLE OF ty_out WITH DEFAULT KEY,
+      gs_out   TYPE ty_out,
+      gv_waers TYPE t001-waers.
+
+DATA: gt_fcat  TYPE slis_t_fieldcat_alv,
+      gs_fcat  TYPE slis_fieldcat_alv,
+      gs_layo  TYPE slis_layout_alv.
+
+*  Währung lesen
+INITIALIZATION.
+  SELECT SINGLE waers INTO gv_waers FROM t001 WHERE bukrs = c_bukrs.
+
+GET resb LATE.
+
+  CLEAR gs_out.
+
+  gs_out-rsnum  = resb-rsnum.
+  gs_out-bdter  = resb-bdter.
+  gs_out-gel    = resb-enmng.
+  gs_out-matnr  = resb-matnr.
+  gs_out-bdmng  = resb-bdmng.
+  gs_out-enmng  = resb-enmng.
+  gs_out-diffmg = resb-bdmng - resb-enmng.
+  gs_out-meins  = resb-meins.
+  gs_out-rsart  = resb-rsart.
+  gs_out-bwart  = resb-bwart.
+  gs_out-aufnr  = resb-aufnr.
+  IF gs_out-aufnr IS NOT INITIAL.
+    SHIFT gs_out-aufnr LEFT DELETING LEADING '0'.
+  ENDIF.
+  gs_out-menge  = resb-bdmng.
+  gs_out-lgort  = resb-lgort.
+  gs_out-waers  = gv_waers.
+
+  " AUFNR (ohne führende Nullen)
+  IF resb-aufnr IS NOT INITIAL.
+    gs_out-kont = resb-aufnr.
+    SHIFT gs_out-kont LEFT DELETING LEADING '0'.
+  ELSE.
+    CLEAR gs_out-kont.
+  ENDIF.
+
+  " Materialkurztext
+  SELECT SINGLE maktx
+    INTO gs_out-maktx
+    FROM makt
+   WHERE matnr = resb-matnr
+     AND spras = p_lang.
+
+  " Auftragsart (AUFK-AUART)
+  IF resb-aufnr IS NOT INITIAL.
+    SELECT SINGLE auart
+      INTO gs_out-auart
+      FROM aufk
+     WHERE aufnr = resb-aufnr.
+  ENDIF.
+
+  " Preis aus MBEW (BWKEY=120), VPRSV beachten
+  DATA: lv_vprsv TYPE mbew-vprsv,
+        lv_stprs TYPE mbew-stprs,
+        lv_verpr TYPE mbew-verpr.
+
+  SELECT SINGLE vprsv stprs verpr
+    INTO (lv_vprsv, lv_stprs, lv_verpr)
+    FROM mbew
+   WHERE matnr = resb-matnr
+     AND bwkey = c_bwkey.
+
+  IF sy-subrc = 0.
+    IF lv_vprsv = 'S' AND lv_stprs IS NOT INITIAL.
+      gs_out-verpr = lv_stprs.
+    ELSE.
+      gs_out-verpr = lv_verpr.
+    ENDIF.
+    IF gs_out-verpr IS NOT INITIAL.
+      gs_out-wert = gs_out-diffmg * gs_out-verpr.
+    ENDIF.
+  ENDIF.
+
+  " RSt (Rückstand)
+  CLEAR gs_out-rst.
+
+  APPEND gs_out TO gt_out.
+
+
+*  Nachlauf: Ausgabe
+END-OF-SELECTION.
+  PERFORM alv_display.
+
+
+*  ALV-Anzeige
+FORM alv_display.
+  DATA: lv_tabix TYPE sy-tabix.
+
+  DEFINE add_f.
+    CLEAR gs_fcat.
+    gs_fcat-fieldname = &1.
+    gs_fcat-seltext_m = &2.
+    APPEND gs_fcat TO gt_fcat.
+  END-OF-DEFINITION.
+
+  add_f 'RSNUM'  'ReservNr'.
+  add_f 'BDTER'  'BedTermin'.
+  add_f 'GEL'    'Gel'.
+  add_f 'MATNR'  'Material'.
+  add_f 'BDMNG'  'BedMenge'.
+  add_f 'DIFFMG' 'DiffMg'.
+  add_f 'MEINS'  'BME'.
+  add_f 'RSART'  'RTy'.
+  add_f 'KONT'   'Kontierung'.
+  add_f 'AUART'  'Auftragsart'.
+  add_f 'MAKTX'  'Materialkurztext'.
+  add_f 'BWART'  'BwA'.
+  add_f 'RST'    'RSt'.
+  add_f 'AUFNR'  'Auftrag'.
+  add_f 'ENMNG'  'abg. Menge'.
+  add_f 'MENGE'  'Menge'.
+  add_f 'VERPR'  'Preis'.
+  add_f 'WAERS'  'Währung'.
+  add_f 'WERT'   'Wert offen'.
+  add_f 'LGORT'  'LOrt'.
+
+  gs_layo-zebra = 'X'.
+  gs_layo-colwidth_optimize = 'X'.
+
+  " Summen & Währungsbezug setzen
+  READ TABLE gt_fcat INTO gs_fcat WITH KEY fieldname = 'WERT'.
+  IF sy-subrc = 0.
+    gs_fcat-cfieldname = 'WAERS'.
+    gs_fcat-do_sum     = 'X'.
+    lv_tabix = sy-tabix.
+    MODIFY gt_fcat FROM gs_fcat INDEX lv_tabix.
+  ENDIF.
+
+  READ TABLE gt_fcat INTO gs_fcat WITH KEY fieldname = 'BDMNG'.
+  IF sy-subrc = 0.
+    gs_fcat-do_sum = 'X'.  MODIFY gt_fcat FROM gs_fcat INDEX sy-tabix.
+  ENDIF.
+  READ TABLE gt_fcat INTO gs_fcat WITH KEY fieldname = 'ENMNG'.
+  IF sy-subrc = 0.
+    gs_fcat-do_sum = 'X'.  MODIFY gt_fcat FROM gs_fcat INDEX sy-tabix.
+  ENDIF.
+  READ TABLE gt_fcat INTO gs_fcat WITH KEY fieldname = 'DIFFMG'.
+  IF sy-subrc = 0.
+    gs_fcat-do_sum = 'X'.  MODIFY gt_fcat FROM gs_fcat INDEX sy-tabix.
+  ENDIF.
+
+  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+    EXPORTING
+      is_layout   = gs_layo
+      it_fieldcat = gt_fcat
+    TABLES
+      t_outtab    = gt_out
+    EXCEPTIONS
+      program_error = 1
+      OTHERS        = 2.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+ENDFORM.
