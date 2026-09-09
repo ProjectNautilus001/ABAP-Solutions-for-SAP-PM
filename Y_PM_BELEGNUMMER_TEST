@@ -1,0 +1,91 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_BELEGNUMMER_TEST
+*&
+*&---------------------------------------------------------------------*
+*& Ausgabe komulierter Wert aus VBAP u. VBFA nach Belegnummer
+*&
+*&
+*&
+*& Author     : Student, Christian
+*& date       : 25.08.2025
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*----------------------------------------------------------------------*
+* Änderungshistorie                                                    *
+* Datum      Benutzer:                  Grund                          *
+* ---------- ----------------- --------------------------------------- *
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+REPORT Y_PM_BELEGNUMMER_TEST.
+
+* Tabellen-Deklarationen
+TABLES: vbfa, vbap.
+
+* Datendeklarationen
+DATA: gt_vbfa    TYPE TABLE OF vbfa,
+      gs_vbfa    TYPE vbfa,
+      gt_vbap    TYPE TABLE OF vbap,
+      gs_vbap    TYPE vbap,
+      gv_total_ziel  TYPE vbap-zmeng,
+      gv_total_rfmng TYPE vbfa-rfmng,
+      gv_total_offen TYPE vbap-zmeng.
+
+* Selektionsbildschirm
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
+PARAMETERS: p_vbelv TYPE vbfa-vbelv OBLIGATORY.
+SELECTION-SCREEN END OF BLOCK b1.
+
+* Hauptprogramm
+START-OF-SELECTION.
+  PERFORM get_data.
+  PERFORM process_data.
+  PERFORM display_results.
+
+* Daten aus VBFA und VBAP lesen
+FORM get_data.
+  " Daten aus VBFA lesen
+  SELECT * FROM vbfa
+    INTO TABLE gt_vbfa
+    WHERE vbelv = p_vbelv.
+
+  IF gt_vbfa IS INITIAL.
+    MESSAGE 'Keine Daten in VBFA gefunden für die eingegebene Belegnummer' TYPE 'I'.
+    STOP.
+  ENDIF.
+
+  " Daten aus VBAP lesen (Zielmengen)
+  SELECT * FROM vbap
+    INTO TABLE gt_vbap
+    WHERE vbeln = p_vbelv.
+
+  IF gt_vbap IS INITIAL.
+    MESSAGE 'Keine Daten in VBAP gefunden für die eingegebene Belegnummer' TYPE 'I'.
+    STOP.
+  ENDIF.
+ENDFORM.
+
+* Gesamtsummen berechnen
+FORM process_data.
+  " Gesamtzielmenge aus VBAP berechnen
+  LOOP AT gt_vbap INTO gs_vbap.
+    gv_total_ziel = gv_total_ziel + gs_vbap-zmeng.
+  ENDLOOP.
+
+  " Gesamtgelieferte Menge aus VBFA berechnen
+  LOOP AT gt_vbfa INTO gs_vbfa.
+    gv_total_rfmng = gv_total_rfmng + gs_vbfa-rfmng.
+  ENDLOOP.
+
+  " Offene Gesamtmenge berechnen
+  gv_total_offen = gv_total_ziel - gv_total_rfmng.
+ENDFORM.
+
+* Gesamtsumme anzeigen
+FORM display_results.
+  WRITE: / 'Auswertung für Belegnummer:', p_vbelv.
+  SKIP.
+  WRITE: / 'Gesamtzielmenge:', gv_total_ziel.
+  WRITE: / 'Gesamt gelieferte Menge:', gv_total_rfmng.
+  WRITE: / 'Noch zu liefernde Menge:', gv_total_offen.
+ENDFORM.
