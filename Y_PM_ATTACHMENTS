@@ -1,0 +1,262 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_ATTACHMENTS
+*&---------------------------------------------------------------------*
+*&
+*& Ließt Checklisten aus PM06 für definierten Zeitraum aus.
+*& Interaktive Listansicht ob Anhang vorhanden oder nicht.
+*& Sprung zum Auftrag via Doppelklick.
+*&
+*& Erweiterungen:
+*& - Arbeitsplätze W31-Reihe hinzugefügt.
+*& - Arbeitsplätze W3, W32, W33, W60, W61, W62 Reihen hinzugefügt.
+*& - Arbeitsplatz DL-TEAM hinzugefügt.
+*& - TABG-Checkbox für technisch abgeschlossene Aufträge hinzugefügt.
+*& - Arbeitsplätze über Checkboxen selektierbar.
+*& - Nur Aufträge mit Steuerschlüssel "PRÜF" werden angezeigt.
+*&
+*& Autor     : Student, Christian
+*& Datum     : 14.05.2025
+*&---------------------------------------------------------------------*
+
+REPORT Y_PM_ATTACHMENTS.
+
+TABLES: aufk, afko, afvc.
+
+TYPES: BEGIN OF zpm06_output,
+         aufnr            TYPE aufk-aufnr,  " Auftragsnummer
+         erdat            TYPE aufk-erdat,  " Erstellungsdatum
+         vaplz            TYPE aufk-vaplz,  " Verantwortlicher Arbeitsplatz
+         attachment_exists TYPE string,     " Anhangstatus als Text
+         tabg_status      TYPE string,     " TABG-Status als Text
+       END OF zpm06_output.
+
+DATA: lt_aufk      TYPE TABLE OF aufk,
+      ls_aufk      TYPE aufk,
+      lt_toa02     TYPE TABLE OF toa02,
+      ls_toa02     TYPE toa02,
+      lv_attachment_exists TYPE abap_bool.
+
+DATA: lt_output    TYPE TABLE OF zpm06_output,
+      ls_output    TYPE zpm06_output.
+
+DATA: lv_count     TYPE i.
+
+* Selektion für das Erstellungsdatum (Von-Datum und Bis-Datum)
+SELECTION-SCREEN BEGIN OF BLOCK datum WITH FRAME TITLE TEXT-001.
+PARAMETERS: p_von TYPE aufk-erdat OBLIGATORY,  " Von-Datum
+            p_bis TYPE aufk-erdat OBLIGATORY.  " Bis-Datum
+SELECTION-SCREEN END OF BLOCK datum.
+
+* Checkboxen für Arbeitsplatzgruppen
+SELECTION-SCREEN BEGIN OF BLOCK arbeitsplaetze WITH FRAME TITLE TEXT-002.
+PARAMETERS: p_w3     AS CHECKBOX ,  " W3 aktivieren
+            p_w21    AS CHECKBOX ,  " W21 aktivieren
+            p_w22    AS CHECKBOX ,  " W22 aktivieren
+            p_w31    AS CHECKBOX ,  " W31 aktivieren
+            p_w32    AS CHECKBOX ,  " W32 aktivieren
+            p_w33    AS CHECKBOX ,  " W33 aktivieren
+            p_w60    AS CHECKBOX ,  " W60 aktivieren
+            p_w61    AS CHECKBOX ,  " W61 aktivieren
+            p_w62    AS CHECKBOX ,  " W62 aktivieren
+            p_dlteam AS CHECKBOX . " DL-TEAM aktivieren
+SELECTION-SCREEN END OF BLOCK arbeitsplaetze.
+
+* Checkbox für technisch abgeschlossene Aufträge
+SELECTION-SCREEN BEGIN OF BLOCK status WITH FRAME TITLE TEXT-003.
+PARAMETERS: p_tabg AS CHECKBOX DEFAULT 'X'.  " Nur technisch abgeschlossene Aufträge
+SELECTION-SCREEN END OF BLOCK status.
+
+START-OF-SELECTION.
+
+  DATA: lt_vaplz_ranges TYPE RANGE OF aufk-vaplz.
+  DATA: lt_tabg_condition TYPE RANGE OF aufk-idat2.
+  DATA: lt_aufnr_with_pruef TYPE RANGE OF aufk-aufnr.
+
+* TABG-Bedingung vorbereiten (nur wenn Checkbox gesetzt)
+  IF p_tabg = 'X'.
+    APPEND VALUE #( sign = 'I' option = 'NE' low = '00000000' ) TO lt_tabg_condition.
+    APPEND VALUE #( sign = 'I' option = 'NE' low = '' ) TO lt_tabg_condition.
+  ENDIF.
+
+* W3-Arbeitsplätze, wenn Checkbox aktiv
+  IF p_w3 = 'X'.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W3-E' ) TO lt_vaplz_ranges.
+  ENDIF.
+
+* W21-Arbeitsplätze, wenn Checkbox aktiv
+  IF p_w21 = 'X'.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W21' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W21-A' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W21-B' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W21-TEAM' ) TO lt_vaplz_ranges.
+  ENDIF.
+
+* W22-Arbeitsplätze, wenn Checkbox aktiv
+  IF p_w22 = 'X'.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W22' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W22-A' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W22-B' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W22-TEAM' ) TO lt_vaplz_ranges.
+  ENDIF.
+
+* W31-Arbeitsplätze, wenn Checkbox aktiv
+  IF p_w31 = 'X'.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W31' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W31-A' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W31-B' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W31-TEAM' ) TO lt_vaplz_ranges.
+  ENDIF.
+
+* W32-Arbeitsplätze, wenn Checkbox aktiv
+  IF p_w32 = 'X'.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W32' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W32-TEAM' ) TO lt_vaplz_ranges.
+  ENDIF.
+
+* W33-Arbeitsplätze, wenn Checkbox aktiv
+  IF p_w33 = 'X'.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W33' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W33-TEAM' ) TO lt_vaplz_ranges.
+  ENDIF.
+
+* W60-Arbeitsplätze, wenn Checkbox aktiv
+  IF p_w60 = 'X'.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W60' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W60-A' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W60-B' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W60-TEAM' ) TO lt_vaplz_ranges.
+  ENDIF.
+
+* W61-Arbeitsplätze, wenn Checkbox aktiv
+  IF p_w61 = 'X'.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W61' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W61-AKDR' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W61-A' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W61-B' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W61-C' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W61-D' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W61-E' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W61-F' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W61-L' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W61-TEAM' ) TO lt_vaplz_ranges.
+  ENDIF.
+
+* W62-Arbeitsplätze, wenn Checkbox aktiv
+  IF p_w62 = 'X'.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W62' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W62-AKDR' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W62-A' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W62-B' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W62-C' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W62-FHZ1' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W62-FHZ2' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W62-FHZ3' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W62-TEAM' ) TO lt_vaplz_ranges.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'W62-W' ) TO lt_vaplz_ranges.
+  ENDIF.
+
+* DL-TEAM Arbeitsplatz, wenn Checkbox aktiv
+  IF p_dlteam = 'X'.
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = 'DL-TEAM' ) TO lt_vaplz_ranges.
+  ENDIF.
+
+* PM06-Aufträge innerhalb des angegebenen Zeitraums und mit Arbeitsplätzen auswählen
+  SELECT * FROM aufk INTO TABLE @lt_aufk
+    WHERE auart = 'PM06'            " Auftragsart PM06
+      AND erdat BETWEEN @p_von AND @p_bis  " Zeitraum
+      AND vaplz IN @lt_vaplz_ranges.      " Nur ausgewählte Arbeitsplätze
+
+  IF p_tabg = 'X'.
+    DELETE lt_aufk WHERE idat2 = '00000000' OR idat2 IS INITIAL.
+  ENDIF.
+
+* Nur Aufträge mit Steuerschlüssel "PRÜF" behalten
+  IF lt_aufk IS NOT INITIAL.
+    " AFKO und AFVC joinen um Aufträge mit PRÜF-Steuerschlüssel zu finden
+    SELECT a~aufnr
+      FROM aufk AS a
+      INNER JOIN afko AS k ON a~aufnr = k~aufnr
+      INNER JOIN afvc AS v ON k~aufpl = v~aufpl
+      INTO TABLE @DATA(lt_pruef_aufnr)
+      FOR ALL ENTRIES IN @lt_aufk
+      WHERE a~aufnr = @lt_aufk-aufnr
+        AND v~steus = 'PRÜF'.
+
+    IF sy-subrc = 0.
+      " Ranges-Tabelle für die Auftragsnummern mit PRÜF-Steuerschlüssel erstellen
+      DATA: lt_pruef_ranges TYPE RANGE OF aufk-aufnr.
+      LOOP AT lt_pruef_aufnr ASSIGNING FIELD-SYMBOL(<fs_pruef>).
+        APPEND VALUE #( sign = 'I' option = 'EQ' low = <fs_pruef>-aufnr ) TO lt_pruef_ranges.
+      ENDLOOP.
+
+      " Nur Aufträge behalten, die in der Prüf-Liste sind
+      DELETE lt_aufk WHERE aufnr NOT IN lt_pruef_ranges.
+    ELSE.
+      " Keine Aufträge mit PRÜF-Steuerschlüssel gefunden
+      CLEAR lt_aufk.
+    ENDIF.
+  ENDIF.
+
+  lv_count = 0.
+
+  LOOP AT lt_aufk INTO ls_aufk.
+    CLEAR: lv_attachment_exists.
+
+    SELECT * FROM toa02 INTO TABLE @lt_toa02
+      WHERE object_id = @ls_aufk-aufnr
+        AND sap_object = 'BUS2007'.
+
+    IF sy-subrc = 0.
+      lv_attachment_exists = abap_true.
+    ENDIF.
+
+    ls_output-aufnr = ls_aufk-aufnr.
+    ls_output-erdat = ls_aufk-erdat.
+    ls_output-vaplz = ls_aufk-vaplz.
+
+    " Anhangstatus setzen
+    IF lv_attachment_exists = abap_true.
+      ls_output-attachment_exists = 'Anhang vorhanden'.
+    ELSE.
+      ls_output-attachment_exists = 'kein Anhang'.
+    ENDIF.
+
+    " TABG-Status setzen
+    IF ls_aufk-idat2 IS NOT INITIAL AND ls_aufk-idat2 <> '00000000'.
+      ls_output-tabg_status = 'TABG'.
+    ELSE.
+      ls_output-tabg_status = 'nicht TABG'.
+    ENDIF.
+
+    APPEND ls_output TO lt_output.
+    lv_count = lv_count + 1.
+  ENDLOOP.
+
+  LOOP AT lt_output INTO ls_output.
+    WRITE: / 'Auftrag:', ls_output-aufnr,
+           'Datum:', ls_output-erdat,
+           'Arbeitsplatz:', ls_output-vaplz,
+           'Anhangstatus:', ls_output-attachment_exists,
+           'Status:', ls_output-tabg_status.
+  ENDLOOP.
+
+* Gesamtanzahl der Aufträge anzeigen
+  WRITE: / 'Gesamtanzahl der Aufträge:', lv_count.
+
+* Interaktive Liste aktivieren
+  SET USER-COMMAND 'PICK'.
+
+END-OF-SELECTION.
+
+AT LINE-SELECTION.
+* Zeile auswählen, auf die geklickt wurde
+  DATA: lv_aufnr TYPE aufk-aufnr.
+
+* Auftragsnummer aus der ausgewählten Zeile holen
+  READ CURRENT LINE FIELD VALUE ls_output-aufnr INTO lv_aufnr.
+
+* Transaktion IW33 aufrufen, um den Auftrag anzuzeigen
+  IF lv_aufnr IS NOT INITIAL.
+    SET PARAMETER ID 'ANR' FIELD lv_aufnr.
+    CALL TRANSACTION 'IW33' AND SKIP FIRST SCREEN.
+  ENDIF.
