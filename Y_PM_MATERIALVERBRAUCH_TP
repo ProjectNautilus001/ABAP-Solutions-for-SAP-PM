@@ -1,0 +1,327 @@
+* _____ _   _____________ _   __   __  _    _ _____ ______  ___  ____________
+*/  ___| | | | ___ \ ___ \ |  \ \ / / | |  | |_   _|___  / / _ \ | ___ \  _  \
+*\ `--.| | | | |_/ / |_/ / |   \ V /  | |  | | | |    / / / /_\ \| |_/ / | | |
+* `--. \ | | |  __/|  __/| |    \ /   | |/\| | | |   / /  |  _  ||    /| | | |
+*/\__/ / |_| | |   | |   | |____| |   \  /\  /_| |_./ /___| | | || |\ \| |/ /
+*\____/ \___/\_|   \_|   \_____/\_/    \/  \/ \___/\_____/\_| |_/\_| \_|___/
+*
+*
+*             _,._
+* .||,       /_ _\\
+*\.`',/      |'L'| |
+*= ,. =      | -,| L
+*/ || \    ,-'\"/,'`.
+*  ||     ,'   `,,. `.
+*  ,|____,' , ,;' \| |
+* (3|\    _/|/'   _| |
+*  ||/,-''  | >-'' _,\\
+*  ||'      ==\ ,-'  ,'
+*  ||       |  V \ ,|
+*  ||       |    |` |
+*  ||       |    |   \
+*  ||       |    \    \
+*  ||       |     |    \
+*  ||       |      \_,-'
+*  ||       |___,,--")_\
+*  ||         |_|   ccc/
+*  ||        ccc/
+*  ||
+*&---------------------------------------------------------------------*
+*& Report Y_PM_MATERIALVERBRAUCH_TP
+*&---------------------------------------------------------------------*
+*& Lagerverbrauch + Direktbeschaffung je technischem Platz
+*&---------------------------------------------------------------------*
+*& Author     : Student, Christian
+*& date       : 30.07.2026
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*----------------------------------------------------------------------*
+* Änderungshistorie                                                    *
+* Datum      Benutzer:                  Grund                          *
+* ---------- ----------------- --------------------------------------- *
+*&---------------------------------------------------------------------*
+
+
+REPORT Y_PM_MATERIALVERBRAUCH_TP NO STANDARD PAGE HEADING.
+
+TABLES: iflot,
+        mara,
+        aufk,
+        mkpf.
+
+SELECTION-SCREEN COMMENT /1(70) gv_head1.
+SELECTION-SCREEN COMMENT /1(70) gv_head2.
+SELECTION-SCREEN COMMENT /1(70) gv_head3.
+SELECTION-SCREEN COMMENT /1(70) gv_head4.
+SELECTION-SCREEN COMMENT /1(70) gv_head5.
+
+SELECT-OPTIONS:
+  s_tplnr FOR iflot-tplnr,
+  s_aufnr FOR aufk-aufnr,
+  s_matnr FOR mara-matnr,
+  s_datum FOR sy-datum.
+
+DATA gv_text TYPE char80.
+
+SELECT-OPTIONS:
+  s_text FOR gv_text.
+
+PARAMETERS:
+  p_lager AS CHECKBOX DEFAULT 'X',
+  p_best  AS CHECKBOX DEFAULT 'X',
+  p_nodl  AS CHECKBOX DEFAULT 'X'.
+
+TYPES: BEGIN OF ty_out,
+         datum   TYPE sy-datum,
+         tplnr   TYPE iflot-tplnr,
+         aufnr   TYPE aufnr,
+         matnr   TYPE matnr,
+         text    TYPE char80,
+         menge   TYPE menge_d,
+         wert    TYPE ekpo-netwr,
+         banfn   TYPE banfn,
+         ebeln   TYPE ebeln,
+         lifnr   TYPE lifnr,
+         quelle  TYPE char20,
+       END OF ty_out.
+
+TYPES: BEGIN OF ty_lager,
+         tplnr TYPE iflot-tplnr,
+         aufnr TYPE aufnr,
+         matnr TYPE matnr,
+         maktx TYPE makt-maktx,
+         menge TYPE mseg-menge,
+         dmbtr TYPE mseg-dmbtr,
+         budat TYPE mkpf-budat,
+       END OF ty_lager.
+
+TYPES: BEGIN OF ty_best,
+         tplnr TYPE iflot-tplnr,
+         aufnr TYPE aufnr,
+         matnr TYPE matnr,
+         txz01 TYPE ekpo-txz01,
+         menge TYPE ekpo-menge,
+         netwr TYPE ekpo-netwr,
+         banfn TYPE ekpo-banfn,
+         ebeln TYPE ekpo-ebeln,
+         lifnr TYPE ekko-lifnr,
+         bedat TYPE ekko-bedat,
+         pstyp TYPE ekpo-pstyp,
+       END OF ty_best.
+
+DATA: gt_out   TYPE STANDARD TABLE OF ty_out,
+      gs_out   TYPE ty_out,
+      gt_lager TYPE STANDARD TABLE OF ty_lager,
+      gs_lager TYPE ty_lager,
+      gt_best  TYPE STANDARD TABLE OF ty_best,
+      gs_best  TYPE ty_best.
+
+DATA: gr_alv       TYPE REF TO cl_salv_table,
+      lr_functions TYPE REF TO cl_salv_functions_list,
+      lr_columns   TYPE REF TO cl_salv_columns_table,
+      lr_column    TYPE REF TO cl_salv_column.
+
+INITIALIZATION.
+
+  gv_head1 = '===================================================='.
+  gv_head2 = '                                          = SUPPLY WIZARD =    '.
+  gv_head3 = '                  =     MATERIALVERBRAUCH JE TECHNISCHEM PLATZ       ='.
+  gv_head4 = '                            =   Lagerverbrauch | Direktbeschaffung   ='.
+  gv_head5 = '===================================================='.
+
+  REFRESH s_datum.
+
+  s_datum-sign   = 'I'.
+  s_datum-option = 'BT'.
+
+  CONCATENATE sy-datum+0(4) '0101'
+         INTO s_datum-low.
+
+  CONCATENATE sy-datum+0(4) '1231'
+         INTO s_datum-high.
+
+  APPEND s_datum.
+
+AT SELECTION-SCREEN.
+
+  IF p_lager = space AND p_best = space.
+    MESSAGE 'Bitte mindestens eine Quelle (Lager/Bestellung) wählen.'
+            TYPE 'E'.
+  ENDIF.
+
+START-OF-SELECTION.
+
+  IF p_lager = 'X'.
+
+    SELECT iloa~tplnr
+           mseg~aufnr
+           mseg~matnr
+           makt~maktx
+           mseg~menge
+           mseg~dmbtr
+           mkpf~budat
+      INTO TABLE gt_lager
+      FROM mseg
+      INNER JOIN afih ON afih~aufnr = mseg~aufnr
+      INNER JOIN iloa ON iloa~iloan = afih~iloan
+      INNER JOIN mkpf ON mkpf~mblnr = mseg~mblnr
+                     AND mkpf~mjahr = mseg~mjahr
+      LEFT OUTER JOIN makt ON makt~matnr = mseg~matnr
+                           AND makt~spras = sy-langu
+
+     WHERE iloa~tplnr IN s_tplnr
+       AND mseg~aufnr IN s_aufnr
+       AND mseg~matnr IN s_matnr
+       AND mkpf~budat IN s_datum
+       AND mseg~bwart =  '261'
+       AND mseg~menge <> 0.
+
+    LOOP AT gt_lager INTO gs_lager.
+
+      CLEAR gs_out.
+      gs_out-tplnr  = gs_lager-tplnr.
+      gs_out-aufnr  = gs_lager-aufnr.
+      gs_out-matnr  = gs_lager-matnr.
+      gs_out-text   = gs_lager-maktx.
+      gs_out-menge  = gs_lager-menge.
+      gs_out-wert   = gs_lager-dmbtr.
+      gs_out-datum  = gs_lager-budat.
+
+      IF s_text[] IS NOT INITIAL.
+
+  IF gs_out-text NOT IN s_text.
+    CONTINUE.
+  ENDIF.
+
+ENDIF.
+
+      gs_out-quelle = 'LAGER'.
+      APPEND gs_out TO gt_out.
+
+    ENDLOOP.
+
+  ENDIF.
+
+  IF p_best = 'X'.
+
+    SELECT iloa~tplnr
+           ekkn~aufnr
+           ekpo~matnr
+           ekpo~txz01
+           ekpo~menge
+           ekpo~netwr
+           ekpo~banfn
+           ekpo~ebeln
+           ekko~lifnr
+           ekko~bedat
+           ekpo~pstyp
+      INTO TABLE gt_best
+      FROM ekkn
+      INNER JOIN ekpo ON ekpo~ebeln = ekkn~ebeln
+                      AND ekpo~ebelp = ekkn~ebelp
+      INNER JOIN ekko ON ekko~ebeln = ekpo~ebeln
+      INNER JOIN afih ON afih~aufnr = ekkn~aufnr
+      INNER JOIN iloa ON iloa~iloan = afih~iloan
+
+     WHERE iloa~tplnr IN s_tplnr
+       AND ekkn~aufnr IN s_aufnr
+       AND ekko~bedat IN s_datum
+       AND ekpo~matnr IN s_matnr
+       AND ekpo~menge <> 0.
+
+    LOOP AT gt_best INTO gs_best.
+
+      IF p_nodl = 'X' AND gs_best-pstyp = '9'.
+        CONTINUE.
+      ENDIF.
+
+      CLEAR gs_out.
+      gs_out-tplnr  = gs_best-tplnr.
+      gs_out-aufnr  = gs_best-aufnr.
+      gs_out-matnr  = gs_best-matnr.
+      gs_out-text   = gs_best-txz01.
+      gs_out-menge  = gs_best-menge.
+      gs_out-wert   = gs_best-netwr.
+      gs_out-banfn  = gs_best-banfn.
+      gs_out-ebeln  = gs_best-ebeln.
+      gs_out-lifnr  = gs_best-lifnr.
+      gs_out-datum  = gs_best-bedat.
+
+     IF s_text[] IS NOT INITIAL.
+
+  IF gs_out-text NOT IN s_text.
+    CONTINUE.
+  ENDIF.
+
+ENDIF.
+
+      gs_out-quelle = 'DIREKTBESTELLUNG'.
+      APPEND gs_out TO gt_out.
+
+    ENDLOOP.
+
+  ENDIF.
+
+  SORT gt_out BY datum.
+
+  IF gt_out IS INITIAL.
+    MESSAGE 'Keine Daten für die gewählten Selektionskriterien gefunden.'
+            TYPE 'S' DISPLAY LIKE 'W'.
+    RETURN.
+  ENDIF.
+
+  cl_salv_table=>factory(
+    IMPORTING r_salv_table = gr_alv
+    CHANGING  t_table      = gt_out ).
+
+  lr_functions = gr_alv->get_functions( ).
+  lr_functions->set_all( abap_true ).
+
+  lr_columns = gr_alv->get_columns( ).
+  lr_columns->set_optimize( abap_true ).
+
+  gr_alv->get_display_settings( )->set_striped_pattern( abap_true ).
+
+  TRY.
+
+      lr_column ?= lr_columns->get_column( 'DATUM' ).
+      lr_column->set_medium_text( 'Datum' ).
+
+      lr_column ?= lr_columns->get_column( 'TPLNR' ).
+      lr_column->set_medium_text( 'Techn. Platz' ).
+
+      lr_column ?= lr_columns->get_column( 'AUFNR' ).
+      lr_column->set_medium_text( 'Auftrag' ).
+
+      lr_column ?= lr_columns->get_column( 'MATNR' ).
+      lr_column->set_medium_text( 'Material' ).
+
+      lr_column ?= lr_columns->get_column( 'TEXT' ).
+      lr_column->set_medium_text( 'Bezeichnung' ).
+
+      lr_column ?= lr_columns->get_column( 'MENGE' ).
+      lr_column->set_medium_text( 'Menge' ).
+
+      lr_column ?= lr_columns->get_column( 'WERT' ).
+      lr_column->set_medium_text( 'Bestellnettowert' ).
+
+      lr_column ?= lr_columns->get_column( 'BANFN' ).
+      lr_column->set_medium_text( 'BANF' ).
+
+      lr_column ?= lr_columns->get_column( 'EBELN' ).
+      lr_column->set_medium_text( 'Bestellung' ).
+
+      lr_column ?= lr_columns->get_column( 'LIFNR' ).
+      lr_column->set_medium_text( 'Kreditor' ).
+
+      lr_column ?= lr_columns->get_column( 'QUELLE' ).
+      lr_column->set_short_text(  'Art' ).
+      lr_column->set_medium_text( 'Quelle' ).
+      lr_column->set_long_text(   'Beschaffungsart' ).
+
+    CATCH cx_salv_not_found.
+  ENDTRY.
+
+  gr_alv->display( ).
+
