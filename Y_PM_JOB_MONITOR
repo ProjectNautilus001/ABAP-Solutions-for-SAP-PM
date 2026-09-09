@@ -1,0 +1,191 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_JOB_MONITOR
+*&---------------------------------------------------------------------*
+*& SAP Job-Monitor
+*& Prüft abgebrochene Jobs des aktuellen Tages anhand TBTCO
+*& Selektionskriterium:
+*&   SDLSTRTDT = p_date (Default SY-DATUM)
+*&   STATUS    = 'A'
+*&
+*& Wenn kein Job-Anleger eingetragen ist, werden alle Jobs überwacht.
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*& Author     : Student, Christian
+*& date       : 06.08.2026
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*&----------------------------------------------------------------------*
+*& Änderungshistorie                                                    *
+*& Datum      Benutzer:                  Grund                          *
+*& ---------- ----------------- --------------------------------------- *
+*&----------------------------------------------------------------------*
+
+REPORT y_pm_job_monitor NO STANDARD PAGE HEADING.
+
+PARAMETERS: p_mail TYPE ad_smtpadr LOWER CASE,
+            p_user TYPE tbtco-sdluname.
+*           p_date TYPE sy-datum DEFAULT sy-datum.
+
+DATA: lt_jobs        TYPE TABLE OF tbtco,
+      ls_job         TYPE tbtco,
+      lt_known       TYPE TABLE OF ypm_job_alert,
+      ls_known       TYPE ypm_job_alert,
+      lt_to_report   TYPE TABLE OF tbtco,
+      lt_text        TYPE soli_tab,
+      ls_text        TYPE soli,
+      lt_new         TYPE TABLE OF ypm_job_alert,
+      ls_new         TYPE ypm_job_alert,
+      lt_joblog_text TYPE soli_tab,
+      ls_joblog_text TYPE soli.
+
+DATA: lo_send_request TYPE REF TO cl_bcs,
+      lo_document     TYPE REF TO cl_document_bcs.
+
+FORM read_joblog USING    iv_jobname  TYPE tbtco-jobname
+                          iv_jobcount TYPE tbtco-jobcount
+                 CHANGING ct_log      TYPE soli_tab.
+
+  DATA: lt_joblog TYPE TABLE OF tbtc5,
+        ls_joblog TYPE tbtc5,
+        ls_log    TYPE soli,
+        lv_lines  TYPE i,
+        lv_from   TYPE i.
+  CLEAR ct_log.
+
+  CALL FUNCTION 'BP_JOBLOG_READ'
+    EXPORTING
+      jobcount  = iv_jobcount
+      jobname   = iv_jobname
+    TABLES
+      joblogtbl = lt_joblog
+    EXCEPTIONS
+      OTHERS    = 1.
+
+  IF sy-subrc = 0.
+    lv_lines = lines( lt_joblog ).
+    IF lv_lines > 5.
+      lv_from = lv_lines - 4.
+    ELSE.
+      lv_from = 1.
+    ENDIF.
+
+    LOOP AT lt_joblog INTO ls_joblog FROM lv_from.
+      ls_log-line = ls_joblog-text.
+      APPEND ls_log TO ct_log.
+    ENDLOOP.
+  ELSE.
+
+    ls_log-line = '  (Joblog konnte nicht gelesen werden)'.
+    APPEND ls_log TO ct_log.
+  ENDIF.
+
+ENDFORM.
+
+START-OF-SELECTION.
+
+  IF p_user IS INITIAL.
+  SELECT *
+    FROM tbtco
+    INTO TABLE lt_jobs
+   WHERE sdlstrtdt = sy-datum
+     AND status    = 'A'.
+
+ELSE.
+  SELECT *
+    FROM tbtco
+    INTO TABLE lt_jobs
+   WHERE sdlstrtdt = sy-datum
+     AND status    = 'A'
+     AND sdluname  = p_user.
+
+ENDIF.
+
+  IF lt_jobs IS INITIAL.
+    WRITE: / 'Keine abgebrochenen Jobs gefunden.'.
+    RETURN.
+  ENDIF.
+
+  SELECT *
+    FROM ypm_job_alert
+    INTO TABLE lt_known
+   WHERE sdlstrtdt = sy-datum.
+  LOOP AT lt_jobs INTO ls_job.
+    READ TABLE lt_known INTO ls_known
+      WITH KEY jobname   = ls_job-jobname
+               jobcount  = ls_job-jobcount
+               sdlstrtdt = ls_job-sdlstrtdt.
+
+    IF sy-subrc <> 0.
+      APPEND ls_job TO lt_to_report.
+    ENDIF.
+
+  ENDLOOP.
+
+
+*DATA: lv_count TYPE i.
+**DESCRIBE TABLE lt_to_report LINES lv_count.
+**WRITE: / 'Anzahl neue Abbrüche:', lv_count.
+
+
+  IF lt_to_report IS INITIAL.
+    WRITE: / 'Keine neuen Abbrüche gefunden.'.
+    RETURN.
+  ENDIF.
+
+
+  ls_text-line = 'Folgende Hintergrundjobs wurden abgebrochen:'.
+  APPEND ls_text TO lt_text.
+
+  LOOP AT lt_to_report INTO ls_job.
+    CLEAR ls_text.
+
+    CONCATENATE ls_job-jobname
+                ls_job-jobcount
+                ls_job-sdlstrtdt
+                ls_job-sdlstrttm
+           INTO ls_text-line
+           SEPARATED BY space.
+
+    APPEND ls_text TO lt_text.
+    PERFORM read_joblog
+      USING ls_job-jobname
+            ls_job-jobcount
+      CHANGING lt_joblog_text.
+
+    APPEND LINES OF lt_joblog_text TO lt_text.
+    CLEAR ls_new.
+
+    ls_new-jobname   = ls_job-jobname.
+    ls_new-jobcount  = ls_job-jobcount.
+    ls_new-sdlstrtdt = ls_job-sdlstrtdt.
+    APPEND ls_new TO lt_new.
+
+  ENDLOOP.
+
+IF p_mail IS NOT INITIAL.
+
+  TRY.
+      lo_send_request = cl_bcs=>create_persistent( ).
+      lo_document = cl_document_bcs=>create_document(
+        i_type    = 'RAW'
+        i_text    = lt_text
+        i_subject = 'SAP Jobmonitor - abgebrochene Jobs' ).
+
+      lo_send_request->set_document( lo_document ).
+      lo_send_request->add_recipient(
+        i_recipient =
+          cl_cam_address_bcs=>create_internet_address( p_mail ) ).
+      lo_send_request->send(
+        i_with_error_screen = 'X' ).
+
+      COMMIT WORK.
+
+      WRITE: / 'E-Mail wurde versendet.'.
+    CATCH cx_bcs.
+
+*      WRITE: / 'Fehler beim Mailversand.'.
+
+  ENDTRY.
+
+ENDIF.
