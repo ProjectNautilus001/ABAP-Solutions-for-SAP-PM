@@ -1,0 +1,62 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_VORPERIODE
+*&---------------------------------------------------------------------*
+*& Setzt Vorperiode in TVARVC "ZZ_VORPERIODE"
+*&
+*&
+*&
+*& Author     : Student, Christian
+*& date       : 03.11.2025
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*----------------------------------------------------------------------*
+* Änderungshistorie                                                    *
+* Datum      Benutzer:                  Grund                          *
+* ---------- ----------------- --------------------------------------- *
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*&
+*&---------------------------------------------------------------------*
+REPORT y_pm_vorperiode.
+
+DATA: lv_date    TYPE sy-datum,
+      lv_month   TYPE i,
+      lv_prev    TYPE i,
+      lv_period  TYPE char2,
+      ls_tvarvc  TYPE tvarvc.
+
+lv_date = sy-datum.
+
+lv_month = CONV i( lv_date+4(2) ).
+
+lv_prev = lv_month - 1.
+IF lv_prev = 0.
+  lv_prev = 12.
+ENDIF.
+
+lv_period = |{ lv_prev }|.
+
+* Debug-Ausgabe
+WRITE: / 'Berechneter Vormonat (lv_prev):', lv_prev.
+WRITE: / 'Gespeicherter Periodenwert (lv_period):', lv_period.
+
+* TVARVC-Eintrag
+SELECT SINGLE * INTO ls_tvarvc
+  FROM tvarvc
+  WHERE name = 'ZZ_VORPERIODE'
+    AND type = 'P'.
+
+IF sy-subrc = 0.
+  UPDATE tvarvc SET low = lv_period
+    WHERE name = 'ZZ_VORPERIODE'
+      AND type = 'P'.
+  WRITE: / 'Variable ZZ_VORPERIODE aktualisiert auf:', lv_period.
+ELSE.
+  CLEAR ls_tvarvc.
+  ls_tvarvc-name = 'ZZ_VORPERIODE'.
+  ls_tvarvc-type = 'P'.
+  ls_tvarvc-low  = lv_period.
+  INSERT tvarvc FROM ls_tvarvc.
+  WRITE: / 'Variable ZZ_VORPERIODE neu angelegt mit Wert:', lv_period.
+ENDIF.
