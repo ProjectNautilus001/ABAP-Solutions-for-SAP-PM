@@ -1,0 +1,987 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_STAMMDATEN_AUSWERTUNG
+*&---------------------------------------------------------------------*
+*&
+*&---------------------------------------------------------------------*
+*& Der Report dient der Analyse von Stammdatentabellen im SAP ECC      *
+*& als Vorbereitung fuer ein S/4HANA-Vorprojekt. Er identifiziert      *
+*& sowohl SAP-Standard-Stammdaten als auch eigene Y-/Z-Tabellen        *
+*& und unterstützt damit die Erstellung einer fachlichen und           *
+*& technischen Stammdatenlandkarte.                                    *
+*&                                                                     *
+*&                                                                     *
+*&---------------------------------------------------------------------*
+*& Technische Basis                                                    *
+*& Verwendete Informationsquellen:                                     *
+*& - DD02L fuer aktive transparente Tabellen                           *
+*& - DD02T fuer Kurzbeschreibungen                                     *
+*& - DD03L fuer Tabellenstruktur                                       *
+*&---------------------------------------------------------------------*
+*& Funktionsumfang                                                     *
+*& - Selektion von SAP-Standardtabellen und/oder Y-/Z-Custom-Tabellen  *
+*& - Filterung auf stammdatenrelevante Tabellen                        *
+*& - Klassifizierung nach Fachclustern, z. B. Material, Anlagen,       *
+*&   Debitor/Kunde, Kreditor/Lieferant, PM-technische Objekte,         *
+*&   Klassifizierung, Business Partner und Arbeitspläne/Stücklisten    *
+*& - Kennzeichnung kundeneigener Tabellen als                          *
+*&   Custom-Stammdaten-Kandidaten                                      *
+*& - Strukturinformationen über DD03L, z. B. Feldanzahl,               *
+*&   Schlüsselfelder und Mandantenabhängigkeit                         *
+*& - Optionale Grössenanalyse über Datensatzanzahl                     *
+*& - S/4-Relevanzbewertung über Ampellogik                             *
+*& - Ausgabe als klassisches ALV                                       *
+*&                                                                     *
+*&                                                                     *
+*&                                                                     *
+*& Author     : Student, Christian                                     *
+*& Date       : 22.06.2026                                             *
+*& Kind of p. : Report    (x)     Batch-Input ( )      Include   ( )   *
+*&              Sonstiges/others  ( )                  Modulpool   ( ) *
+*&---------------------------------------------------------------------*
+
+
+REPORT y_pm_stammdaten_auswertung.
+
+TYPE-POOLS: slis.
+
+TABLES: dd02l,
+        dd02t,
+        dd03l.
+
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME.
+PARAMETERS: p_sap   AS CHECKBOX DEFAULT 'X',
+            p_cust  AS CHECKBOX DEFAULT 'X',
+            p_stamm AS CHECKBOX DEFAULT 'X',
+            p_size  AS CHECKBOX DEFAULT 'X',
+            p_leer  AS CHECKBOX DEFAULT 'X',
+            p_hist  AS CHECKBOX DEFAULT 'X',
+            p_max   TYPE i DEFAULT 5000.
+SELECT-OPTIONS: s_tab FOR dd02l-tabname.
+SELECTION-SCREEN END OF BLOCK b1.
+
+TYPES: BEGIN OF ty_result,
+         ampel       TYPE c LENGTH 1,
+         score       TYPE i,
+         kritikal    TYPE c LENGTH 12,
+         empfehlung  TYPE c LENGTH 60,
+         objekttyp   TYPE c LENGTH 30,
+         tabname     TYPE dd02l-tabname,
+         ddtext      TYPE dd02t-ddtext,
+         source      TYPE c LENGTH 12,
+         cluster     TYPE c LENGTH 30,
+         subcluster  TYPE c LENGTH 30,
+         kandidattyp TYPE c LENGTH 30,
+         feldanz     TYPE i,
+         keyanz      TYPE i,
+         mandt       TYPE c LENGTH 1,
+         anz_dat     TYPE i,
+         groesse     TYPE c LENGTH 10,
+         alt_jahre   TYPE i,
+         applclass   TYPE dd02l-applclass,
+         authclass   TYPE dd02l-authclass,
+         as4user     TYPE dd02l-as4user,
+         as4date     TYPE dd02l-as4date,
+         buffered    TYPE dd02l-buffered,
+         langdep     TYPE dd02l-langdep,
+       END OF ty_result.
+
+DATA: gt_result      TYPE STANDARD TABLE OF ty_result,
+      gs_result      TYPE ty_result,
+      gt_dd02        TYPE STANDARD TABLE OF dd02l,
+      gs_dd02        TYPE dd02l,
+      g_ddtext       TYPE dd02t-ddtext,
+      g_repid        TYPE sy-repid,
+      g_lines        TYPE i,
+      g_keep         TYPE i,
+      gt_fieldcat    TYPE slis_t_fieldcat_alv,
+      gs_fieldcat    TYPE slis_fieldcat_alv,
+      gs_layout      TYPE slis_layout_alv,
+      gt_listheader  TYPE slis_t_listheader,
+      gs_listheader  TYPE slis_listheader,
+      g_events       TYPE slis_t_event,
+      gs_event       TYPE slis_alv_event,
+      g_total        TYPE i,
+      g_sap          TYPE i,
+      g_cust         TYPE i,
+      g_gross        TYPE i,
+      g_leer         TYPE i,
+      g_rot          TYPE i,
+      g_gelb         TYPE i,
+      g_gruen        TYPE i,
+      g_custom_rot   TYPE i.
+
+INITIALIZATION.
+  g_repid = sy-repid.
+
+START-OF-SELECTION.
+  PERFORM validate_selection.
+  PERFORM get_tables.
+  PERFORM classify_tables.
+  PERFORM limit_result.
+  PERFORM build_summary.
+  PERFORM build_fieldcat.
+  PERFORM build_events.
+  PERFORM show_alv.
+
+FORM validate_selection.
+  IF p_sap IS INITIAL AND p_cust IS INITIAL.
+    MESSAGE 'Bitte mindestens SAP oder Z/Y auswählen.' TYPE 'E'.
+  ENDIF.
+
+  IF p_max IS INITIAL OR p_max LE 0.
+    p_max = 5000.
+  ENDIF.
+ENDFORM.
+
+FORM get_tables.
+  SELECT *
+    FROM dd02l
+    INTO TABLE gt_dd02
+    WHERE tabclass = 'TRANSP'
+      AND as4local = 'A'
+      AND tabname IN s_tab.
+
+  IF sy-subrc NE 0.
+    MESSAGE 'Keine Tabellen zu den Selektionskriterien gefunden.' TYPE 'I'.
+    LEAVE LIST-PROCESSING.
+  ENDIF.
+ENDFORM.
+
+FORM classify_tables.
+  DATA: g_is_hist TYPE c.
+
+  LOOP AT gt_dd02 INTO gs_dd02.
+    CLEAR: gs_result,
+           g_ddtext,
+           g_is_hist.
+
+    PERFORM determine_source USING gs_dd02-tabname
+                             CHANGING gs_result-source.
+
+    IF gs_result-source = 'SAP-Standard' AND p_sap IS INITIAL.
+      CONTINUE.
+    ENDIF.
+
+    IF gs_result-source = 'Z/Y-Custom' AND p_cust IS INITIAL.
+      CONTINUE.
+    ENDIF.
+
+    PERFORM determine_history_flag USING gs_dd02-tabname
+                                   CHANGING g_is_hist.
+
+    IF g_is_hist = 'X' AND p_hist IS INITIAL.
+      CONTINUE.
+    ENDIF.
+
+    PERFORM determine_cluster USING gs_dd02-tabname
+                              CHANGING gs_result-cluster
+                                       gs_result-subcluster
+                                       gs_result-kandidattyp.
+
+    IF p_stamm = 'X'.
+      IF gs_result-kandidattyp NE 'Stammdaten-Kandidat' AND
+         gs_result-kandidattyp NE 'Custom-Stammdaten-Kandidat'.
+        CONTINUE.
+      ENDIF.
+    ENDIF.
+
+    SELECT SINGLE ddtext
+      INTO g_ddtext
+      FROM dd02t
+      WHERE tabname    = gs_dd02-tabname
+        AND ddlanguage = sy-langu
+        AND as4local   = 'A'.
+
+    IF sy-subrc NE 0.
+      SELECT SINGLE ddtext
+        INTO g_ddtext
+        FROM dd02t
+        WHERE tabname    = gs_dd02-tabname
+          AND ddlanguage = 'E'
+          AND as4local   = 'A'.
+    ENDIF.
+
+    PERFORM get_dd03l_info USING gs_dd02-tabname
+                           CHANGING gs_result-feldanz
+                                    gs_result-keyanz
+                                    gs_result-mandt.
+
+    IF p_size = 'X'.
+      PERFORM get_table_count USING gs_dd02-tabname
+                              CHANGING gs_result-anz_dat.
+      PERFORM determine_size_class USING gs_result-anz_dat
+                                   CHANGING gs_result-groesse.
+    ELSE.
+      CLEAR: gs_result-anz_dat,
+             gs_result-groesse.
+    ENDIF.
+
+    IF p_leer IS INITIAL AND p_size = 'X' AND gs_result-anz_dat = 0.
+      CONTINUE.
+    ENDIF.
+
+    PERFORM determine_objekttyp USING gs_dd02-tabname
+                                      gs_result-source
+                                      gs_result-cluster
+                                      gs_result-subcluster
+                                      gs_result-feldanz
+                                      gs_result-keyanz
+                                      gs_result-anz_dat
+                                CHANGING gs_result-objekttyp.
+
+    PERFORM determine_age USING gs_dd02-as4date
+                          CHANGING gs_result-alt_jahre.
+
+    PERFORM determine_management_score USING gs_dd02-tabname
+                                             gs_result-source
+                                             gs_result-cluster
+                                             gs_result-subcluster
+                                             gs_result-kandidattyp
+                                             gs_result-objekttyp
+                                             gs_result-feldanz
+                                             gs_result-keyanz
+                                             gs_result-anz_dat
+                                             gs_result-groesse
+                                             gs_result-alt_jahre
+                                       CHANGING gs_result-score.
+
+    PERFORM determine_kritikal USING gs_result-score
+                               CHANGING gs_result-kritikal
+                                        gs_result-ampel.
+
+    PERFORM determine_empfehlung USING gs_dd02-tabname
+                                       gs_result-source
+                                       gs_result-cluster
+                                       gs_result-subcluster
+                                       gs_result-objekttyp
+                                       gs_result-kritikal
+                                       gs_result-anz_dat
+                                       gs_result-alt_jahre
+                                 CHANGING gs_result-empfehlung.
+
+    gs_result-tabname     = gs_dd02-tabname.
+    gs_result-ddtext      = g_ddtext.
+    gs_result-applclass   = gs_dd02-applclass.
+    gs_result-authclass   = gs_dd02-authclass.
+    gs_result-as4user     = gs_dd02-as4user.
+    gs_result-as4date     = gs_dd02-as4date.
+    gs_result-buffered    = gs_dd02-buffered.
+    gs_result-langdep     = gs_dd02-langdep.
+
+    APPEND gs_result TO gt_result.
+  ENDLOOP.
+
+  SORT gt_result BY ampel score DESCENDING source cluster subcluster tabname.
+ENDFORM.
+
+FORM limit_result.
+  DESCRIBE TABLE gt_result LINES g_lines.
+  IF g_lines GT p_max.
+    g_keep = p_max + 1.
+    DELETE gt_result FROM g_keep.
+  ENDIF.
+ENDFORM.
+
+FORM determine_source USING    p_tabname TYPE dd02l-tabname
+                      CHANGING p_source  TYPE c.
+  IF p_tabname CP 'Z*' OR p_tabname CP 'Y*'.
+    p_source = 'Z/Y-Custom'.
+  ELSE.
+    p_source = 'SAP-Standard'.
+  ENDIF.
+ENDFORM.
+
+FORM determine_history_flag USING    p_tabname TYPE dd02l-tabname
+                            CHANGING p_histfl TYPE c.
+  CLEAR p_histfl.
+
+  IF p_tabname CS '_H' OR
+     p_tabname CP '*H' OR
+     p_tabname CS '_TMP' OR
+     p_tabname CS 'TMP' OR
+     p_tabname CS 'HIST' OR
+     p_tabname CS 'LOG' OR
+     p_tabname CS 'ACT' OR
+     p_tabname CS 'PRC' OR
+     p_tabname CS 'SRC'.
+    p_histfl = 'X'.
+  ENDIF.
+ENDFORM.
+
+FORM determine_cluster USING    p_tabname      TYPE dd02l-tabname
+                       CHANGING p_cluster      TYPE c
+                                p_subcluster   TYPE c
+                                p_kandidattyp TYPE c.
+  CLEAR: p_cluster,
+         p_subcluster,
+         p_kandidattyp.
+
+  CASE p_tabname.
+    WHEN 'MARA' OR 'MARC' OR 'MARD' OR 'MBEW' OR 'MARM' OR 'MVKE'.
+      p_cluster = 'Material'.
+      IF p_tabname = 'MARA'.
+        p_subcluster = 'Core Stammdaten'.
+      ELSEIF p_tabname = 'MARC' OR p_tabname = 'MARD'.
+        p_subcluster = 'Org.-/Lagersegment'.
+      ELSEIF p_tabname = 'MBEW'.
+        p_subcluster = 'Bewertung'.
+      ELSE.
+        p_subcluster = 'Vertrieb / UoM'.
+      ENDIF.
+      p_kandidattyp = 'Stammdaten-Kandidat'.
+
+    WHEN 'KNA1' OR 'KNB1' OR 'KNVV' OR 'ADRC'.
+      p_cluster = 'Debitor / Kunde'.
+      IF p_tabname = 'KNA1'.
+        p_subcluster = 'Core Stammdaten'.
+      ELSEIF p_tabname = 'KNB1' OR p_tabname = 'KNVV'.
+        p_subcluster = 'Org.-abh. Daten'.
+      ELSE.
+        p_subcluster = 'Adressdaten'.
+      ENDIF.
+      p_kandidattyp = 'Stammdaten-Kandidat'.
+
+    WHEN 'LFA1' OR 'LFB1' OR 'LFM1'.
+      p_cluster = 'Kreditor / Lieferant'.
+      IF p_tabname = 'LFA1'.
+        p_subcluster = 'Core Stammdaten'.
+      ELSE.
+        p_subcluster = 'Org.-abh. Daten'.
+      ENDIF.
+      p_kandidattyp = 'Stammdaten-Kandidat'.
+
+    WHEN 'ANLA' OR 'ANLB' OR 'ANLU' OR 'ANLZ' OR 'ANLC' OR 'ANLP' OR 'ANLE' OR 'ANLH' OR 'ANLI' OR 'ANLK'.
+      p_cluster = 'Anlagen'.
+      IF p_tabname = 'ANLA' OR p_tabname = 'ANLH' OR p_tabname = 'ANLU' OR p_tabname = 'ANLZ'.
+        p_subcluster = 'Core Stammdaten'.
+      ELSEIF p_tabname = 'ANLB' OR p_tabname = 'ANLC'.
+        p_subcluster = 'Bewertung'.
+      ELSEIF p_tabname = 'ANLP' OR p_tabname = 'ANLE' OR p_tabname = 'ANLK' OR p_tabname = 'ANLI'.
+        p_subcluster = 'Werte / Historie'.
+      ELSE.
+        p_subcluster = 'Anlagen Sonstige'.
+      ENDIF.
+      p_kandidattyp = 'Stammdaten-Kandidat'.
+
+    WHEN 'IFLOT' OR 'ILOA' OR 'EQUI' OR 'EQKT' OR 'IHPA'.
+      p_cluster = 'PM Technische Objekte'.
+      IF p_tabname = 'IFLOT' OR p_tabname = 'EQUI'.
+        p_subcluster = 'Core Stammdaten'.
+      ELSEIF p_tabname = 'ILOA'.
+        p_subcluster = 'Standort / Kontierung'.
+      ELSE.
+        p_subcluster = 'Texte / Partner'.
+      ENDIF.
+      p_kandidattyp = 'Stammdaten-Kandidat'.
+
+    WHEN 'KLAH' OR 'KSML' OR 'CABN' OR 'CAWN' OR 'AUSP' OR 'KSSK'.
+      p_cluster = 'Klassifizierung'.
+      IF p_tabname = 'CABN' OR p_tabname = 'CAWN' OR p_tabname = 'KLAH'.
+        p_subcluster = 'Core Stammdaten'.
+      ELSE.
+        p_subcluster = 'Zuordnung / Werte'.
+      ENDIF.
+      p_kandidattyp = 'Stammdaten-Kandidat'.
+
+    WHEN 'CRHD' OR 'CRTX' OR 'PLKO' OR 'PLPO' OR 'STKO' OR 'STPO'.
+      p_cluster = 'Arbeitspläne / Stücklisten'.
+      IF p_tabname = 'CRHD' OR p_tabname = 'PLKO' OR p_tabname = 'STKO'.
+        p_subcluster = 'Kopf / Stammsatz'.
+      ELSE.
+        p_subcluster = 'Position / Vorgang'.
+      ENDIF.
+      p_kandidattyp = 'Stammdaten-Kandidat'.
+
+    WHEN 'BUT000'.
+      p_cluster = 'Business Partner'.
+      p_subcluster = 'Core Stammdaten'.
+      p_kandidattyp = 'Stammdaten-Kandidat'.
+
+    WHEN OTHERS.
+      IF p_tabname CP 'MAR*'.
+        p_cluster = 'Material'.
+        p_subcluster = 'Material Sonstige'.
+        p_kandidattyp = 'Stammdaten-Kandidat'.
+      ELSEIF p_tabname CP 'KNA*'.
+        p_cluster = 'Debitor / Kunde'.
+        p_subcluster = 'Kunde Sonstige'.
+        p_kandidattyp = 'Stammdaten-Kandidat'.
+      ELSEIF p_tabname CP 'LFA*'.
+        p_cluster = 'Kreditor / Lieferant'.
+        p_subcluster = 'Lieferant Sonstige'.
+        p_kandidattyp = 'Stammdaten-Kandidat'.
+      ELSEIF p_tabname CP 'ANL*'.
+        p_cluster = 'Anlagen'.
+        p_subcluster = 'Anlagen Sonstige'.
+        p_kandidattyp = 'Stammdaten-Kandidat'.
+      ELSEIF p_tabname CP 'T*'.
+        p_cluster = 'Customizing / Steuerung'.
+        p_subcluster = 'Steuerung'.
+        p_kandidattyp = 'Customizing-Kandidat'.
+      ELSEIF p_tabname CP 'Z*' OR p_tabname CP 'Y*'.
+        PERFORM classify_custom_table USING p_tabname
+                                      CHANGING p_cluster
+                                               p_subcluster
+                                               p_kandidattyp.
+      ELSE.
+        p_cluster = 'Unklassifiziert'.
+        p_subcluster = 'Prüfen'.
+        p_kandidattyp = 'Prüfen'.
+      ENDIF.
+  ENDCASE.
+ENDFORM.
+
+FORM classify_custom_table USING    p_tabname      TYPE dd02l-tabname
+                           CHANGING p_cluster      TYPE c
+                                    p_subcluster   TYPE c
+                                    p_kandidattyp TYPE c.
+  IF p_tabname CS 'STAMM' OR
+     p_tabname CS 'MASTER' OR
+     p_tabname CS 'KUNDE' OR
+     p_tabname CS 'KNA' OR
+     p_tabname CS 'LIEF' OR
+     p_tabname CS 'LFA' OR
+     p_tabname CS 'MAT' OR
+     p_tabname CS 'MARA' OR
+     p_tabname CS 'ANL' OR
+     p_tabname CS 'ASSET' OR
+     p_tabname CS 'EQUI' OR
+     p_tabname CS 'IFLOT' OR
+     p_tabname CS 'ADR' OR
+     p_tabname CS 'PARTNER' OR
+     p_tabname CS 'OBJ' OR
+     p_tabname CS 'TECH'.
+    p_cluster = 'Z/Y Custom-Stammdaten'.
+    IF p_tabname CS 'ANL' OR p_tabname CS 'ASSET'.
+      p_subcluster = 'Anlagen Custom'.
+    ELSEIF p_tabname CS 'MAT' OR p_tabname CS 'MARA'.
+      p_subcluster = 'Material Custom'.
+    ELSEIF p_tabname CS 'KNA' OR p_tabname CS 'KUNDE' OR p_tabname CS 'ADR'.
+      p_subcluster = 'Kunde Custom'.
+    ELSEIF p_tabname CS 'LFA' OR p_tabname CS 'LIEF'.
+      p_subcluster = 'Lieferant Custom'.
+    ELSEIF p_tabname CS 'IFLOT' OR p_tabname CS 'EQUI' OR p_tabname CS 'TECH' OR p_tabname CS 'OBJ'.
+      p_subcluster = 'PM / Objekt Custom'.
+    ELSE.
+      p_subcluster = 'Custom Stammdaten'.
+    ENDIF.
+    p_kandidattyp = 'Custom-Stammdaten-Kandidat'.
+  ELSEIF p_tabname CS 'CUST' OR
+         p_tabname CS 'CFG' OR
+         p_tabname CS 'PARA' OR
+         p_tabname CS 'PARAM' OR
+         p_tabname CS 'WF' OR
+         p_tabname CS 'MAIL' OR
+         p_tabname CS 'LOG'.
+    p_cluster = 'Z/Y Steuerung / Logik'.
+    p_subcluster = 'Steuerung'.
+    p_kandidattyp = 'Prüfen'.
+  ELSE.
+    p_cluster = 'Z/Y individuell'.
+    p_subcluster = 'Prüfen'.
+    p_kandidattyp = 'Prüfen'.
+  ENDIF.
+ENDFORM.
+
+FORM get_dd03l_info USING    p_tabname TYPE dd03l-tabname
+                    CHANGING p_feldanz TYPE i
+                             p_keyanz  TYPE i
+                             p_mandt   TYPE c.
+  DATA: g_fieldname TYPE dd03l-fieldname.
+
+  CLEAR: p_feldanz,
+         p_keyanz,
+         p_mandt,
+         g_fieldname.
+
+  SELECT COUNT( * ) INTO p_feldanz
+    FROM dd03l
+    WHERE tabname    = p_tabname
+      AND as4local   = 'A'
+      AND adminfield = '0'.
+
+  SELECT COUNT( * ) INTO p_keyanz
+    FROM dd03l
+    WHERE tabname    = p_tabname
+      AND as4local   = 'A'
+      AND keyflag    = 'X'
+      AND adminfield = '0'.
+
+  SELECT SINGLE fieldname INTO g_fieldname
+    FROM dd03l
+    WHERE tabname    = p_tabname
+      AND as4local   = 'A'
+      AND fieldname  = 'MANDT'
+      AND adminfield = '0'.
+
+  IF sy-subrc = 0.
+    p_mandt = 'X'.
+  ENDIF.
+ENDFORM.
+
+FORM get_table_count USING    p_tabname TYPE dd02l-tabname
+                     CHANGING p_anzdat  TYPE i.
+  DATA: g_tabname TYPE dd02l-tabname.
+
+  CLEAR p_anzdat.
+  g_tabname = p_tabname.
+
+  SELECT COUNT( * ) INTO p_anzdat FROM (g_tabname).
+ENDFORM.
+
+FORM determine_size_class USING    p_anzdat  TYPE i
+                          CHANGING p_groesse TYPE c.
+  CLEAR p_groesse.
+
+  IF p_anzdat LE 0.
+    p_groesse = 'LEER'.
+  ELSEIF p_anzdat LE 100.
+    p_groesse = 'KLEIN'.
+  ELSEIF p_anzdat LE 10000.
+    p_groesse = 'MITTEL'.
+  ELSE.
+    p_groesse = 'GROSS'.
+  ENDIF.
+ENDFORM.
+
+FORM determine_objekttyp USING    p_tabname    TYPE dd02l-tabname
+                                  p_source     TYPE c
+                                  p_cluster    TYPE c
+                                  p_subcluster TYPE c
+                                  p_feldanz    TYPE i
+                                  p_keyanz     TYPE i
+                                  p_anzdat     TYPE i
+                         CHANGING p_objekttyp  TYPE c.
+  CLEAR p_objekttyp.
+
+  IF p_anzdat = 0.
+    p_objekttyp = 'Leer / inaktiv'.
+    RETURN.
+  ENDIF.
+
+  IF p_tabname CS 'TMP' OR p_tabname CS 'LOG' OR p_tabname CS 'ACT' OR
+     p_tabname CS 'PRC' OR p_tabname CS 'SRC'.
+    p_objekttyp = 'Technisch / Hilfstabelle'.
+    RETURN.
+  ENDIF.
+
+  IF p_tabname CP '*H' OR p_tabname CS 'HIST'.
+    p_objekttyp = 'Historie / Archiv'.
+    RETURN.
+  ENDIF.
+
+  IF p_feldanz LE 4 AND p_keyanz LE 2 AND p_anzdat LE 10000.
+    p_objekttyp = 'Zuordnung / Mapping'.
+    RETURN.
+  ENDIF.
+
+  IF p_cluster = 'Anlagen' AND p_subcluster = 'Werte / Historie'.
+    p_objekttyp = 'Bewertung / Werte'.
+    RETURN.
+  ENDIF.
+
+  IF p_cluster = 'Klassifizierung' AND p_subcluster = 'Zuordnung / Werte'.
+    p_objekttyp = 'Zuordnung / Werte'.
+    RETURN.
+  ENDIF.
+
+  IF p_cluster = 'Arbeitspläne / Stücklisten' AND p_anzdat GT 1000.
+    p_objekttyp = 'Struktur / Position'.
+    RETURN.
+  ENDIF.
+
+  IF p_cluster = 'PM Technische Objekte' AND p_subcluster = 'Standort / Kontierung'.
+    p_objekttyp = 'Standort / Kontierung'.
+    RETURN.
+  ENDIF.
+
+  IF p_cluster = 'Material' OR
+     p_cluster = 'Debitor / Kunde' OR
+     p_cluster = 'Kreditor / Lieferant' OR
+     p_cluster = 'Business Partner' OR
+     p_subcluster = 'Core Stammdaten'.
+    p_objekttyp = 'Echte Stammdaten'.
+    RETURN.
+  ENDIF.
+
+  IF p_source = 'Z/Y-Custom' AND p_anzdat GT 0.
+    p_objekttyp = 'Custom Stammdaten'.
+    RETURN.
+  ENDIF.
+
+  p_objekttyp = 'Prüfen'.
+ENDFORM.
+
+FORM determine_age USING    p_as4date   TYPE dd02l-as4date
+                   CHANGING p_altjahre TYPE i.
+  DATA: g_jahr_as4 TYPE i,
+        g_jahr_now TYPE i.
+
+  CLEAR: p_altjahre,
+         g_jahr_as4,
+         g_jahr_now.
+
+  IF p_as4date IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  g_jahr_as4 = p_as4date(4).
+  g_jahr_now = sy-datum(4).
+  p_altjahre = g_jahr_now - g_jahr_as4.
+ENDFORM.
+
+FORM determine_management_score USING    p_tabname      TYPE dd02l-tabname
+                                         p_source       TYPE c
+                                         p_cluster      TYPE c
+                                         p_subcluster   TYPE c
+                                         p_kandidattyp  TYPE c
+                                         p_objekttyp    TYPE c
+                                         p_feldanz      TYPE i
+                                         p_keyanz       TYPE i
+                                         p_anzdat       TYPE i
+                                         p_groesse      TYPE c
+                                         p_altjahre     TYPE i
+                                CHANGING p_score        TYPE i.
+  CLEAR p_score.
+
+  IF p_source = 'Z/Y-Custom'.
+    p_score = p_score + 30.
+  ELSE.
+    p_score = p_score + 10.
+  ENDIF.
+
+  IF p_cluster = 'Material' OR
+     p_cluster = 'Debitor / Kunde' OR
+     p_cluster = 'Kreditor / Lieferant' OR
+     p_cluster = 'Anlagen' OR
+     p_cluster = 'PM Technische Objekte' OR
+     p_cluster = 'Business Partner'.
+    p_score = p_score + 25.
+  ELSEIF p_cluster = 'Klassifizierung' OR
+         p_cluster = 'Arbeitspläne / Stücklisten'.
+    p_score = p_score + 15.
+  ELSE.
+    p_score = p_score + 5.
+  ENDIF.
+
+  IF p_objekttyp = 'Echte Stammdaten' OR p_objekttyp = 'Custom Stammdaten'.
+    p_score = p_score + 20.
+  ELSEIF p_objekttyp = 'Bewertung / Werte' OR
+         p_objekttyp = 'Standort / Kontierung' OR
+         p_objekttyp = 'Struktur / Position'.
+    p_score = p_score + 10.
+  ELSEIF p_objekttyp = 'Zuordnung / Mapping'.
+    p_score = p_score + 5.
+  ELSEIF p_objekttyp = 'Historie / Archiv' OR p_objekttyp = 'Technisch / Hilfstabelle'.
+    p_score = p_score - 15.
+  ENDIF.
+
+  IF p_anzdat GT 1000000.
+    p_score = p_score + 25.
+  ELSEIF p_anzdat GT 100000.
+    p_score = p_score + 20.
+  ELSEIF p_anzdat GT 10000.
+    p_score = p_score + 15.
+  ELSEIF p_anzdat GT 1000.
+    p_score = p_score + 10.
+  ELSEIF p_anzdat GT 0.
+    p_score = p_score + 3.
+  ELSE.
+    p_score = p_score - 30.
+  ENDIF.
+
+  IF p_feldanz GE 20.
+    p_score = p_score + 5.
+  ELSEIF p_feldanz LE 3.
+    p_score = p_score - 10.
+  ENDIF.
+
+  IF p_keyanz GE 5.
+    p_score = p_score + 3.
+  ELSEIF p_keyanz LE 1.
+    p_score = p_score - 5.
+  ENDIF.
+
+  IF p_tabname CS 'TEST' OR p_tabname CS '_TMP' OR p_tabname CS 'TMP' OR
+     p_tabname CS 'LOG' OR p_tabname CS 'ACT' OR p_tabname CS 'PRC' OR p_tabname CS 'SRC'.
+    p_score = p_score - 25.
+  ENDIF.
+
+  IF p_tabname CP '*H' OR p_tabname CS 'HIST'.
+    p_score = p_score - 10.
+  ENDIF.
+
+  IF p_altjahre GE 10 AND p_anzdat = 0.
+    p_score = p_score - 10.
+  ENDIF.
+
+  IF p_score LT 0.
+    p_score = 0.
+  ENDIF.
+ENDFORM.
+
+FORM determine_kritikal USING    p_score     TYPE i
+                        CHANGING p_kritikal TYPE c
+                                 p_ampel    TYPE c.
+  CLEAR: p_kritikal,
+         p_ampel.
+
+  IF p_score GE 80.
+    p_kritikal = 'HOCH'.
+    p_ampel    = '1'.
+  ELSEIF p_score GE 45.
+    p_kritikal = 'MITTEL'.
+    p_ampel    = '2'.
+  ELSE.
+    p_kritikal = 'NIEDRIG'.
+    p_ampel    = '3'.
+  ENDIF.
+ENDFORM.
+
+FORM determine_empfehlung USING    p_tabname     TYPE dd02l-tabname
+                                   p_source      TYPE c
+                                   p_cluster     TYPE c
+                                   p_subcluster  TYPE c
+                                   p_objekttyp   TYPE c
+                                   p_kritikal    TYPE c
+                                   p_anzdat      TYPE i
+                                   p_altjahre    TYPE i
+                          CHANGING p_empfehlung TYPE c.
+  CLEAR p_empfehlung.
+
+  IF p_anzdat = 0.
+    IF p_source = 'Z/Y-Custom'.
+      p_empfehlung = 'Custom leer: fachlich prüfen'.
+    ELSE.
+      p_empfehlung = 'Leer: für Migration i. d. R. nachrangig'.
+    ENDIF.
+    RETURN.
+  ENDIF.
+
+  IF p_source = 'Z/Y-Custom' AND p_kritikal = 'HOCH'.
+    p_empfehlung = 'Custom mit hoher Relevanz: Fachkonzept und Zielbild'.
+    RETURN.
+  ENDIF.
+
+  IF p_objekttyp = 'Historie / Archiv'.
+    p_empfehlung = 'Historie separat bewerten (Archiv / ILM / Scope)'.
+    RETURN.
+  ENDIF.
+
+  IF p_objekttyp = 'Technisch / Hilfstabelle'.
+    p_empfehlung = 'Technische Tabelle: nur bei Prozessbezug berücks.'.
+    RETURN.
+  ENDIF.
+
+  IF p_cluster = 'Business Partner'.
+    p_empfehlung = 'BP-Zielbild und Mapping zu ECC-Objekten klären'.
+    RETURN.
+  ENDIF.
+
+  IF p_cluster = 'Debitor / Kunde' OR p_cluster = 'Kreditor / Lieferant'.
+    p_empfehlung = 'BP-/CVI-Relevanz und Datenqualität priorisieren'.
+    RETURN.
+  ENDIF.
+
+  IF p_cluster = 'PM Technische Objekte'.
+    p_empfehlung = 'Objektmodell, Standorte und Kontierung validieren'.
+    RETURN.
+  ENDIF.
+
+  IF p_cluster = 'Anlagen'.
+    p_empfehlung = 'Anlagenobjekte und Werteführung fachlich abgrenzen'.
+    RETURN.
+  ENDIF.
+
+  IF p_cluster = 'Material'.
+    p_empfehlung = 'Materialharmonisierung und Segmenttiefe bewerten'.
+    RETURN.
+  ENDIF.
+
+  IF p_kritikal = 'HOCH'.
+    p_empfehlung = 'Im Vorprojekt priorisiert analysieren'.
+  ELSEIF p_kritikal = 'MITTEL'.
+    p_empfehlung = 'Im Workshop bewerten und Verantwortliche zuordnen'.
+  ELSE.
+    p_empfehlung = 'Nachrangig behandeln oder dokumentieren'.
+  ENDIF.
+ENDFORM.
+
+FORM build_summary.
+  DATA: ls_result TYPE ty_result.
+
+  CLEAR: g_total,
+         g_sap,
+         g_cust,
+         g_gross,
+         g_leer,
+         g_rot,
+         g_gelb,
+         g_gruen,
+         g_custom_rot.
+
+  LOOP AT gt_result INTO ls_result.
+    g_total = g_total + 1.
+    IF ls_result-source = 'SAP-Standard'.
+      g_sap = g_sap + 1.
+    ELSEIF ls_result-source = 'Z/Y-Custom'.
+      g_cust = g_cust + 1.
+    ENDIF.
+
+    IF ls_result-groesse = 'GROSS'.
+      g_gross = g_gross + 1.
+    ENDIF.
+
+    IF ls_result-groesse = 'LEER'.
+      g_leer = g_leer + 1.
+    ENDIF.
+
+    IF ls_result-ampel = '1'.
+      g_rot = g_rot + 1.
+      IF ls_result-source = 'Z/Y-Custom'.
+        g_custom_rot = g_custom_rot + 1.
+      ENDIF.
+    ELSEIF ls_result-ampel = '2'.
+      g_gelb = g_gelb + 1.
+    ELSEIF ls_result-ampel = '3'.
+      g_gruen = g_gruen + 1.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.
+
+************************************************************************
+* V7.3: F1-READY FIELDCATALOG
+************************************************************************
+FORM build_fieldcat.
+  REFRESH gt_fieldcat.
+
+  PERFORM add_fieldcat USING 'AMPEL'      'Ampel'           '' ''.
+  PERFORM add_fieldcat USING 'SCORE'      'Score'           '' 'YPM_ALV_SCORE'.
+  PERFORM add_fieldcat USING 'KRITIKAL'   'Kritikalität'    '' 'YPM_ALV_KRITIKAL'.
+  PERFORM add_fieldcat USING 'EMPFEHLUNG' 'Empfehlung'      '' 'YPM_ALV_EMPFEHLUNG'.
+  PERFORM add_fieldcat USING 'OBJEKTTYP'  'Objekttyp'       '' 'YPM_ALV_OBJEKTTYP'.
+  PERFORM add_fieldcat USING 'TABNAME'    'Tabellenname'    '' ''.
+  PERFORM add_fieldcat USING 'DDTEXT'     'Kurzbeschreibung' '' ''.
+  PERFORM add_fieldcat USING 'SOURCE'     'Quelle'          '' ''.
+  PERFORM add_fieldcat USING 'CLUSTER'    'Fachbereich'     '' 'YPM_ALV_FACHBEREICH'.
+  PERFORM add_fieldcat USING 'SUBCLUSTER' 'Datentyp'        '' 'YPM_ALV_DATENTYP'.
+  PERFORM add_fieldcat USING 'KANDIDATTYP' 'Bewertung'      '' ''.
+  PERFORM add_fieldcat USING 'FELDANZ'    'Feldanzahl'      '' ''.
+  PERFORM add_fieldcat USING 'KEYANZ'     'Schlüssel'       '' 'YPM_ALV_KEYANZ'.
+  PERFORM add_fieldcat USING 'MANDT'      'Mandant'         '' ''.
+  PERFORM add_fieldcat USING 'ANZ_DAT'    'Datensätze'      '' 'YPM_ALV_ANZDAT'.
+  PERFORM add_fieldcat USING 'GROESSE'    'Grösse'          '' 'YPM_ALV_GROESSE'.
+  PERFORM add_fieldcat USING 'ALT_JAHRE'  'Alter J.'        '' 'YPM_ALV_ALTJAHRE'.
+  PERFORM add_fieldcat USING 'APPLCLASS'  'ApplClass'       '' 'YPM_ALV_APPLCLASS'.
+  PERFORM add_fieldcat USING 'AUTHCLASS'  'AuthClass'       '' 'YPM_ALV_AUTHCLASS'.
+  PERFORM add_fieldcat USING 'AS4USER'    'Angelegt von'    '' ''.
+  PERFORM add_fieldcat USING 'AS4DATE'    'Änderungsdatum' '' ''.
+  PERFORM add_fieldcat USING 'BUFFERED'   'Buffered'        '' 'YPM_ALV_BUFFERED'.
+  PERFORM add_fieldcat USING 'LANGDEP'    'Sprachabhängig' '' ''.
+ENDFORM.
+
+************************************************************************
+* V7.3: ADD_FIELDCAT MIT ROLLNAME FUER F1-HILFE
+************************************************************************
+FORM add_fieldcat USING p_fieldname TYPE slis_fieldcat_alv-fieldname
+                        p_seltext   TYPE slis_fieldcat_alv-seltext_l
+                        p_hotspot   TYPE c
+                        p_rollname  TYPE slis_fieldcat_alv-rollname.
+  CLEAR gs_fieldcat.
+  gs_fieldcat-fieldname = p_fieldname.
+  gs_fieldcat-seltext_l = p_seltext.
+  gs_fieldcat-seltext_m = p_seltext.
+  gs_fieldcat-seltext_s = p_seltext.
+
+  IF p_hotspot = 'X'.
+    gs_fieldcat-hotspot = 'X'.
+  ENDIF.
+
+  IF p_rollname IS NOT INITIAL.
+    gs_fieldcat-rollname = p_rollname.
+  ENDIF.
+
+  APPEND gs_fieldcat TO gt_fieldcat.
+ENDFORM.
+
+FORM build_events.
+  REFRESH g_events.
+  CLEAR gs_event.
+  gs_event-name = 'TOP_OF_PAGE'.
+  gs_event-form = 'TOP_OF_PAGE'.
+  APPEND gs_event TO g_events.
+ENDFORM.
+
+FORM top_of_page.
+  REFRESH gt_listheader.
+
+  CLEAR gs_listheader.
+  gs_listheader-typ  = 'H'.
+  gs_listheader-info = 'S/4 Discovery- und Priorisierungsreport'.
+  APPEND gs_listheader TO gt_listheader.
+
+  CLEAR gs_listheader.
+  gs_listheader-typ  = 'S'.
+  gs_listheader-key  = 'Treffer'.
+  WRITE g_total TO gs_listheader-info.
+  APPEND gs_listheader TO gt_listheader.
+
+  CLEAR gs_listheader.
+  gs_listheader-typ  = 'S'.
+  gs_listheader-key  = 'SAP'.
+  WRITE g_sap TO gs_listheader-info.
+  APPEND gs_listheader TO gt_listheader.
+
+  CLEAR gs_listheader.
+  gs_listheader-typ  = 'S'.
+  gs_listheader-key  = 'Custom'.
+  WRITE g_cust TO gs_listheader-info.
+  APPEND gs_listheader TO gt_listheader.
+
+  CLEAR gs_listheader.
+  gs_listheader-typ  = 'S'.
+  gs_listheader-key  = 'Gross'.
+  WRITE g_gross TO gs_listheader-info.
+  APPEND gs_listheader TO gt_listheader.
+
+  CLEAR gs_listheader.
+  gs_listheader-typ  = 'S'.
+  gs_listheader-key  = 'Leer'.
+  WRITE g_leer TO gs_listheader-info.
+  APPEND gs_listheader TO gt_listheader.
+
+  CALL FUNCTION 'REUSE_ALV_COMMENTARY_WRITE'
+    EXPORTING
+      it_list_commentary = gt_listheader.
+ENDFORM.
+
+FORM show_alv.
+  IF gt_result[] IS INITIAL.
+    MESSAGE 'Keine Treffer nach der Filterung gefunden.' TYPE 'I'.
+    RETURN.
+  ENDIF.
+
+  CLEAR gs_layout.
+  gs_layout-zebra             = 'X'.
+  gs_layout-colwidth_optimize = 'X'.
+  gs_layout-lights_fieldname  = 'AMPEL'.
+  gs_layout-lights_tabname    = 'GT_RESULT'.
+
+  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+    EXPORTING
+      i_callback_program     = g_repid
+      i_callback_top_of_page = 'TOP_OF_PAGE'
+      it_events              = g_events
+      is_layout              = gs_layout
+      it_fieldcat            = gt_fieldcat
+      i_save                 = 'A'
+    TABLES
+      t_outtab               = gt_result
+    EXCEPTIONS
+      program_error          = 1
+      OTHERS                 = 2.
+
+  IF sy-subrc NE 0.
+    MESSAGE 'Fehler bei der ALV-Ausgabe.' TYPE 'E'.
+  ENDIF.
+ENDFORM.
