@@ -1,0 +1,123 @@
+*&---------------------------------------------------------------------*
+*& Report  Y_PM_WORKFLOW_MONITORING_MAIL
+*&---------------------------------------------------------------------*
+*& Workflow Monitoring Report
+*& Prüft fehlerhafte Workitems und versendet eine Mail via BCS
+*&
+*& Author : Student, Christian
+*& Date   : 15.06.2026
+*&---------------------------------------------------------------------*
+
+REPORT Y_PM_WORKFLOW_MONITORING_MAIL.
+
+PARAMETERS:
+  p_email TYPE ad_smtpadr OBLIGATORY,
+  p_days  TYPE n LENGTH 3 DEFAULT '007'.
+
+
+DATA: lt_wi TYPE TABLE OF swwwihead,
+      ls_wi TYPE swwwihead.
+
+DATA: lt_text TYPE soli_tab,
+      ls_text TYPE soli.
+
+DATA: lo_send_request TYPE REF TO cl_bcs,
+      lo_document     TYPE REF TO cl_document_bcs,
+      lx_bcs          TYPE REF TO cx_bcs.
+
+DATA: lv_date_from TYPE sy-datum,
+      lv_days      TYPE i.
+
+DATA: lv_count TYPE i.
+DATA: lv_line  TYPE string.
+
+
+START-OF-SELECTION.
+
+* Zeitraum berechnen
+lv_days = p_days.
+lv_date_from = sy-datum - lv_days.
+
+* Workitems selektieren
+SELECT *
+  INTO TABLE lt_wi
+  FROM swwwihead
+  WHERE wi_stat = 'ERROR'
+    AND wi_cd   >= lv_date_from.
+
+* Treffer
+lv_count = LINES( lt_wi ).
+
+IF lv_count = 0.
+  WRITE: / 'Keine fehlerhaften Workitems gefunden.'.
+  EXIT.
+ENDIF.
+
+* Mailtext
+CLEAR ls_text.
+ls_text-line = 'SAP Workflow Monitoring:'.
+APPEND ls_text TO lt_text.
+
+CLEAR ls_text.
+APPEND ls_text TO lt_text.
+
+CLEAR ls_text.
+CONCATENATE 'Zeitraum:' p_days 'Tage' INTO ls_text-line SEPARATED BY space.
+APPEND ls_text TO lt_text.
+
+CLEAR ls_text.
+APPEND ls_text TO lt_text.
+
+CLEAR ls_text.
+ls_text-line = 'Fehlerhafte Workitems:'.
+APPEND ls_text TO lt_text.
+
+LOOP AT lt_wi INTO ls_wi.
+
+  CLEAR lv_line.
+
+  CONCATENATE
+    'WI-ID:' ls_wi-wi_id
+    'Task:'  ls_wi-wi_rh_task
+    'Datum:' ls_wi-wi_cd
+    INTO lv_line SEPARATED BY space.
+
+  CLEAR ls_text.
+  ls_text-line = lv_line.
+  APPEND ls_text TO lt_text.
+
+ENDLOOP.
+
+CLEAR ls_text.
+APPEND ls_text TO lt_text.
+
+CLEAR ls_text.
+ls_text-line = 'Bitte Details in Transaktion SWIA prüfen und ggf. neu ausführen.'.
+APPEND ls_text TO lt_text.
+
+* Mailversand
+TRY.
+
+    lo_send_request = cl_bcs=>create_persistent( ).
+
+    lo_document = cl_document_bcs=>create_document(
+                     i_type    = 'RAW'
+                     i_text    = lt_text
+                     i_subject = 'SAP Workflow Fehler-Monitoring' ).
+
+    lo_send_request->set_document( lo_document ).
+
+    lo_send_request->add_recipient(
+      cl_cam_address_bcs=>create_internet_address( p_email ) ).
+
+    lo_send_request->set_send_immediately( abap_true ).
+
+    lo_send_request->send( ).
+
+    COMMIT WORK.
+
+    WRITE: / 'Mail erfolgreich versendet an:', p_email.
+
+  CATCH cx_bcs INTO lx_bcs.
+    WRITE: / 'Fehler beim Mailversand:', lx_bcs->get_text( ).
+ENDTRY.
