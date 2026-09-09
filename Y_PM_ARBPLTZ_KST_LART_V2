@@ -1,0 +1,63 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_ARBPLTZ_KST_LART
+*&---------------------------------------------------------------------*
+*&
+*& Zeigt die Kostenstellen und Leistungsarten zum Arbeitsplatz
+*&
+*& Erweiterungen:
+*& - Nur Einträge mit befüllten Feldern KOSTL und LSTAR werden angezeigt
+*&
+*& Autor     : Student, Christian
+*& Datum     : 03.07.2025
+*&---------------------------------------------------------------------*
+REPORT Y_PM_ARBPLTZ_KST_LART.
+
+TABLES: crhd, crco.
+
+TYPES: BEGIN OF ty_output,
+         arbpl TYPE crhd-arbpl,
+         kostl TYPE crco-kostl,
+         lstar TYPE crco-lstar,
+       END OF ty_output.
+
+DATA: it_output TYPE STANDARD TABLE OF ty_output.
+
+SELECT-OPTIONS: so_arbpl FOR crhd-arbpl.
+
+START-OF-SELECTION.
+
+ SELECT crhd~arbpl, crco~kostl, crco~lstar
+  INTO CORRESPONDING FIELDS OF TABLE @it_output
+  FROM crhd
+  INNER JOIN crco ON crhd~objid = crco~objid
+                  AND crco~objty = 'A'  " Arbeitsplatz
+  WHERE crhd~arbpl IN @so_arbpl
+    AND crco~kostl IS NOT NULL          " Kostenstelle muss befüllt sein
+    AND crco~lstar IS NOT NULL          " LSTAR darf nicht NULL sein
+    AND crco~lstar <> ''.               " Zusätzlich: Kein leerer String
+
+  IF sy-subrc <> 0.
+    MESSAGE 'Keine Daten gefunden für die ausgewählten Arbeitsplätze' TYPE 'S' DISPLAY LIKE 'E'.
+    RETURN.
+  ENDIF.
+
+  " ALV-Ausgabe
+  TRY.
+      cl_salv_table=>factory(
+        IMPORTING r_salv_table = DATA(alv)
+        CHANGING  t_table      = it_output ).
+
+      alv->get_functions( )->set_all( abap_true ).
+      alv->get_display_settings( )->set_list_header( '¯\_(ツ)_/¯Kostenstellen und Leistungsarten nach Arbeitsplatz' ).
+      alv->get_columns( )->set_optimize( abap_true ).
+
+      " Spaltenüberschriften
+      DATA(lr_columns) = alv->get_columns( ).
+      lr_columns->get_column( 'ARBPL' )->set_long_text( 'Arbeitsplatz' ).
+      lr_columns->get_column( 'KOSTL' )->set_long_text( 'Kostenstelle' ).
+      lr_columns->get_column( 'LSTAR' )->set_long_text( 'Leistungsart' ).
+
+      alv->display( ).
+    CATCH cx_salv_msg INTO DATA(lx_msg).
+      MESSAGE lx_msg->get_text( ) TYPE 'E'.
+  ENDTRY.
