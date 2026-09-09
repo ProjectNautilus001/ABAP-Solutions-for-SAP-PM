@@ -1,0 +1,252 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_MELDUNGEN_MASS_CLOSE
+*&---------------------------------------------------------------------*
+*& Report schließt PM‑Meldungen, indem er den
+*& Systemstatus I0072 (MMAB – Meldung abgeschlossen) setzt und einen
+*& aktiven SPER‑Status bei Bedarf deaktiviert.
+*&
+*& Author     : Student, Christian
+*& date       : 03.03.2026
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*----------------------------------------------------------------------*
+* Änderungshistorie                                                    *
+* Datum      Benutzer:                  Grund                          *
+* ---------- ----------------- --------------------------------------- *
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+
+REPORT Y_PM_MELDUNGEN_MASS_CLOSE.
+
+TABLES: qmel.
+
+
+* Selektionsbild
+SELECT-OPTIONS: s_qmnum FOR qmel-qmnum OBLIGATORY.
+PARAMETERS:     p_test TYPE xfeld DEFAULT 'X' AS CHECKBOX.
+
+
+* Logging
+TYPES: BEGIN OF ty_log,
+         qmnum   TYPE qmnum,
+         result  TYPE char20,
+         message TYPE string,
+       END OF ty_log.
+
+DATA: gt_qmnum TYPE STANDARD TABLE OF qmnum,
+      gs_qmnum TYPE qmnum,
+      gt_log   TYPE STANDARD TABLE OF ty_log,
+      gs_log   TYPE ty_log.
+
+
+* Statusdaten
+DATA: lv_qmnum TYPE qmnum,
+      lv_objnr TYPE jsto-objnr.
+
+DATA: lt_jest  TYPE STANDARD TABLE OF jest,
+      ls_jest  TYPE jest.
+
+DATA: lt_jstat TYPE STANDARD TABLE OF jstat,
+      ls_jstat TYPE jstat.
+
+DATA: gv_istat_sper TYPE jest-stat.   "wird dynamisch ermittelt (optional)
+
+CONSTANTS: c_istat_mmab TYPE jest-stat VALUE 'I0072'.  "hart: MMAB = Meldung abgeschlossen
+
+
+* Interne Systemstatusnummer zu TXT04 ermitteln (z.B. SPER)
+FORM get_istat USING    p_txt04 TYPE c
+               CHANGING p_istat TYPE jest-stat.
+
+  CLEAR p_istat.
+
+  SELECT SINGLE istat
+    FROM tj02t
+    INTO p_istat
+    WHERE spras = sy-langu
+      AND txt04 = p_txt04.
+
+  IF sy-subrc <> 0 OR p_istat IS INITIAL.
+    SELECT SINGLE istat
+      FROM tj02t
+      INTO p_istat
+      WHERE spras = 'D'
+        AND txt04 = p_txt04.
+  ENDIF.
+
+  IF sy-subrc <> 0 OR p_istat IS INITIAL.
+    SELECT SINGLE istat
+      FROM tj02t
+      INTO p_istat
+      WHERE spras = 'E'
+        AND txt04 = p_txt04.
+  ENDIF.
+
+ENDFORM.
+
+
+START-OF-SELECTION.
+
+* SPER intern ermitteln (wenn nicht gefunden -> SPER wird nicht entfernt)
+  PERFORM get_istat USING 'SPER' CHANGING gv_istat_sper.
+
+* Meldungen selektieren
+  CLEAR gt_qmnum.
+  SELECT qmnum
+    FROM qmel
+    INTO TABLE gt_qmnum
+    WHERE qmnum IN s_qmnum.
+
+  IF sy-subrc <> 0 OR gt_qmnum IS INITIAL.
+    MESSAGE s398(00) WITH 'Keine Meldungen zu den Selektionskriterien gefunden.'.
+    EXIT.
+  ENDIF.
+
+  SORT gt_qmnum.
+  DELETE ADJACENT DUPLICATES FROM gt_qmnum.
+
+
+* Verarbeitung
+  LOOP AT gt_qmnum INTO lv_qmnum.
+
+    CLEAR gs_log.
+    gs_log-qmnum = lv_qmnum.
+
+*   OBJNR ermitteln
+    CLEAR lv_objnr.
+    SELECT SINGLE objnr
+      FROM qmel
+      INTO lv_objnr
+      WHERE qmnum = lv_qmnum.
+
+    IF sy-subrc <> 0 OR lv_objnr IS INITIAL.
+      gs_log-result  = 'ERROR'.
+      gs_log-message = 'QMEL nicht gefunden oder OBJNR leer'.
+      APPEND gs_log TO gt_log.
+      CONTINUE.
+    ENDIF.
+
+*   Testlauf: nur protokollieren
+    IF p_test = 'X'.
+      gs_log-result  = 'TEST'.
+      gs_log-message = 'Würde (falls aktiv) SPER deaktivieren und I0072/MMAB setzen'.
+      APPEND gs_log TO gt_log.
+      CONTINUE.
+    ENDIF.
+
+*   Aktuelle Status lesen (JEST)
+    CLEAR lt_jest.
+    CALL FUNCTION 'STATUS_READ'
+      EXPORTING
+        objnr  = lv_objnr
+      TABLES
+        status = lt_jest
+      EXCEPTIONS
+        OTHERS = 1.
+
+    IF sy-subrc <> 0.
+      gs_log-result  = 'ERROR'.
+      gs_log-message = 'STATUS_READ fehlgeschlagen'.
+      APPEND gs_log TO gt_log.
+      CONTINUE.
+    ENDIF.
+
+*   Prüfen: ist I0072 bereits aktiv?
+    DATA lv_mmab_active TYPE xfeld.
+    DATA lv_sper_active TYPE xfeld.
+    CLEAR: lv_mmab_active, lv_sper_active.
+
+    READ TABLE lt_jest INTO ls_jest WITH KEY stat = c_istat_mmab inact = space.
+    IF sy-subrc = 0.
+      lv_mmab_active = 'X'.
+    ENDIF.
+
+    IF gv_istat_sper IS NOT INITIAL.
+      READ TABLE lt_jest INTO ls_jest WITH KEY stat = gv_istat_sper inact = space.
+      IF sy-subrc = 0.
+        lv_sper_active = 'X'.
+      ENDIF.
+    ENDIF.
+
+*   Wenn bereits abgeschlossen und kein SPER aktiv -> nichts zu tun
+    IF lv_mmab_active = 'X' AND lv_sper_active = space.
+      gs_log-result  = 'OK'.
+      gs_log-message = 'Bereits abgeschlossen (I0072/MMAB aktiv)'.
+      APPEND gs_log TO gt_log.
+      CONTINUE.
+    ENDIF.
+
+*   JSTAT aufbauen: SPER deaktivieren (falls aktiv) + I0072 setzen (falls noch nicht aktiv)
+    CLEAR lt_jstat.
+
+    IF lv_sper_active = 'X' AND gv_istat_sper IS NOT INITIAL.
+      CLEAR ls_jstat.
+      ls_jstat-stat  = gv_istat_sper.
+      ls_jstat-inact = 'X'.              "deaktivieren
+      APPEND ls_jstat TO lt_jstat.
+    ENDIF.
+
+    IF lv_mmab_active = space.
+      CLEAR ls_jstat.
+      ls_jstat-stat  = c_istat_mmab.
+      ls_jstat-inact = space.            "aktiv setzen
+      APPEND ls_jstat TO lt_jstat.
+    ENDIF.
+
+    IF lt_jstat IS INITIAL.
+      gs_log-result  = 'OK'.
+      gs_log-message = 'Keine Änderungen nötig'.
+      APPEND gs_log TO gt_log.
+      CONTINUE.
+    ENDIF.
+
+*   Systemstatus ändern
+    CALL FUNCTION 'STATUS_CHANGE_INTERN'
+      EXPORTING
+        objnr     = lv_objnr
+        set_chgkz = 'X'
+      TABLES
+        status    = lt_jstat
+      EXCEPTIONS
+        object_not_found    = 1
+        status_inconsistent = 2
+        status_not_allowed  = 3
+        OTHERS              = 4.
+
+    IF sy-subrc <> 0.
+      gs_log-result = 'ERROR'.
+      CASE sy-subrc.
+        WHEN 1.
+          gs_log-message = 'STATUS_CHANGE_INTERN: Statusobjekt nicht gefunden'.
+        WHEN 2.
+          gs_log-message = 'STATUS_CHANGE_INTERN: Status inkonsistent (setzen & löschen?)'.
+        WHEN 3.
+          gs_log-message = 'STATUS_CHANGE_INTERN: Statusänderung nicht erlaubt'.
+        WHEN OTHERS.
+          gs_log-message = 'STATUS_CHANGE_INTERN: Allgemeiner Fehler'.
+      ENDCASE.
+      APPEND gs_log TO gt_log.
+      CONTINUE.
+    ENDIF.
+
+*   Persistieren
+    COMMIT WORK AND WAIT.
+
+    gs_log-result  = 'OK'.
+    gs_log-message = 'Abgeschlossen (I0072/MMAB gesetzt)'.
+    APPEND gs_log TO gt_log.
+
+  ENDLOOP.
+
+
+* Ausgabe
+END-OF-SELECTION.
+
+  ULINE.
+  WRITE: / 'Meldung', 15 'Ergebnis', 40 'Nachricht'.
+  ULINE.
+
+  LOOP AT gt_log INTO gs_log.
+    WRITE: / gs_log-qmnum, 15 gs_log-result, 40 gs_log-message.
+  ENDLOOP.
