@@ -1,0 +1,93 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_SET_AKTUELLES_JAHR
+*&---------------------------------------------------------------------*
+*& Setzt TVARVC-Parameter auf das aktuelle Jahr (YYYY).
+*& Standardparameter: Y_AKTUELLES_JAHR
+*& Job-tauglich, mit Testlauf und Commit.
+*&
+*& Autor     : Student, Christian
+*& Datum     : 21.01.2026
+*&---------------------------------------------------------------------*
+
+REPORT y_PM_set_aktuelles_jahr.
+
+TABLES: tvarvc.
+
+CONSTANTS:
+  c_actvt_change TYPE activ_auth VALUE '02'.
+
+PARAMETERS:
+  p_name TYPE tvarvc-name DEFAULT 'Y_AKTUELLES_JAHR' OBLIGATORY,
+  p_test AS CHECKBOX DEFAULT 'X'.
+
+DATA:
+  lv_year   TYPE char4,
+  ls_tvarvc TYPE tvarvc.
+
+*---------------------------------------------------------------------*
+* 1) Aktuelles Jahr ermitteln
+*---------------------------------------------------------------------*
+lv_year = sy-datum(4).
+
+*---------------------------------------------------------------------*
+* 3) TVARVC lesen
+*---------------------------------------------------------------------*
+SELECT SINGLE *
+  INTO ls_tvarvc
+  FROM tvarvc
+  WHERE name = p_name
+    AND type = 'P'.
+
+IF sy-subrc = 0.
+  " Eintrag existiert → Update
+  IF p_test = 'X'.
+    MESSAGE s398(00) WITH
+      '[TEST] Würde aktualisieren:' p_name lv_year.
+  ELSE.
+    UPDATE tvarvc
+      SET low = lv_year
+      WHERE name = p_name
+        AND type = 'P'.
+
+    IF sy-subrc = 0.
+      MESSAGE s398(00) WITH
+        'Parameter aktualisiert:' p_name lv_year.
+    ELSE.
+      MESSAGE e398(00) WITH
+        'Fehler beim Update von' p_name.
+      EXIT.
+    ENDIF.
+  ENDIF.
+ELSE.
+  " Eintrag existiert nicht → Insert
+  IF p_test = 'X'.
+    MESSAGE s398(00) WITH
+      '[TEST] Würde anlegen:' p_name lv_year.
+  ELSE.
+    CLEAR ls_tvarvc.
+    ls_tvarvc-name = p_name.
+    ls_tvarvc-type = 'P'.
+    ls_tvarvc-low  = lv_year.
+
+    INSERT tvarvc FROM ls_tvarvc.
+
+    IF sy-subrc = 0.
+      MESSAGE s398(00) WITH
+        'Parameter angelegt:' p_name lv_year.
+    ELSE.
+      MESSAGE e398(00) WITH
+        'Fehler beim Insert von' p_name.
+      EXIT.
+    ENDIF.
+  ENDIF.
+ENDIF.
+
+*---------------------------------------------------------------------*
+* 4) Commit
+*---------------------------------------------------------------------*
+IF p_test IS INITIAL.
+  COMMIT WORK AND WAIT.
+  MESSAGE s398(00) WITH 'Commit durchgeführt'.
+ELSE.
+  MESSAGE s398(00) WITH '[TEST] Kein Commit durchgeführt'.
+ENDIF.
