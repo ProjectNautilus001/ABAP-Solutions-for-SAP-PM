@@ -1,0 +1,1206 @@
+*&---------------------------------------------------------------------*
+*& Report  Y_PM_TABLE_DOWNLOAD_BATCH
+*&---------------------------------------------------------------------*
+*& Report zum Download beliebiger Tabelleninhalte (batchfähig)
+*&
+*& Funktionen:
+*& - Tabellenname frei wählbar
+*& - Feldauswahl über Button auf dem Selektionsbildschirm (Dialog)
+*&   bzw. Wiederverwendung der in der Variante gespeicherten Feldliste
+*&   (Batch/SM36/SM37)
+*& - Lesen nur aus aktuellem Mandanten
+*& - Download als Pipe-getrennte Textdatei direkt auf den
+*&   Applikationsserver (OPEN DATASET / TRANSFER)
+*& - Optionale Zusatztabelle mit freier Feldverknüpfung (Lookup):
+*&   Zu jeder Zeile der Haupttabelle werden über 1 bis 4 frei wählbare
+*&   Verknüpfungsfeldpaare (Haupttabelle <-> Zusatztabelle) ein oder
+*&   mehrere frei wählbare Felder aus einer zweiten Tabelle angehängt.
+*&   Beispiel Composite Key: CSKS.KOSTL+DATBI <-> CSKT.KOSTL+DATBI.
+*& - Optionale Selektionsfilter (WHERE): je 2 frei wählbare Filterfelder
+*&   (Feldname + Wert von/bis) für Haupt- und Zusatztabelle, UND-verknüpft.
+*&   Bei Datumsfeldern (INTTYPE D) wird TT.MM.JJJJ automatisch in das
+*&   interne Format JJJJMMTT gewandelt.
+*&
+*& Hinweis:
+*& Dieser Report nutzt RFC_READ_TABLE. Dadurch ist die Ergebniszeile
+*& technisch auf die RFC_READ_TABLE-Struktur TAB512 begrenzt, und zwar
+*& sowohl für die Haupttabelle als auch (separat) für die Zusatztabelle.
+*& Für breite Tabellen daher nur passende Felder auswählen.
+*&
+*& Hinweis Zusatztabelle/Join:
+*& Die Verknüpfungsfelder (P_JF1H..P_JF4H Haupttabelle / P_JF1Z..P_JF4Z
+*& Zusatztabelle) werden vom Anwender frei eingegeben und NICHT fachlich
+*& validiert. Jedes Feldpaar (z. B. P_JF1H/P_JF1Z) muss entweder komplett
+*& gefüllt oder komplett leer sein; mindestens Paar 1 muss gefüllt sein,
+*& sobald eine Zusatztabelle angegeben ist. Aus allen gefüllten Paaren
+*& wird ein zusammengesetzter Schlüssel gebildet. Passen die Felder
+*& nicht zusammen, bleiben die Zusatzspalten im Export leer.
+*&
+*& Hinweis Batchbetrieb:
+*& Für den Hintergrundlauf müssen zuvor per Dialog (SE38/SA38) über die
+*& Buttons "Felder auswählen" (Haupttabelle) und ggf. "Zusatzfelder
+*& auswählen" (Zusatztabelle) Varianten angelegt werden, in denen p_flds
+*& bzw. p_flds2 bereits gefuellt sind. Im Batch werden dann KEINE Popups
+*& mehr aufgerufen, sondern die Feldlisten aus p_flds/p_flds2 restauriert.
+*& p_file ist ein Pfad auf dem SAP-Server o. hW-Netzlaufwerk.
+*&---------------------------------------------------------------------*
+*& Author     : https://www.elearningsolutions.co.in/dynamically-download-data-from-any-sap-table-in-abap-740-part-1/*
+*& Systemrelevante Anpassungen : C.Student
+*& Date       : 04.08.2026
+*&---------------------------------------------------------------------*
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*----------------------------------------------------------------------*
+* Änderungshistorie                                                    *
+* Datum      Benutzer:                  Grund                          *
+* ---------- ----------------- --------------------------------------- *
+* 11.08.2026 -C.Student        Zusatztabelle: bis zu 4 Verknüpfungs-   *
+*                               feldpaare (Composite Key) statt nur 1  *
+* 11.08.2026 -C.Student         Optionale Selektionsfilter (2x Haupt-  *
+*                               tabelle, 2x Zusatztabelle, von/bis)    *
+*&---------------------------------------------------------------------*
+
+REPORT y_test_table_download_batch NO STANDARD PAGE HEADING.
+
+TYPES: BEGIN OF ty_fld.
+        INCLUDE STRUCTURE dd03p.
+TYPES:   mark      TYPE c LENGTH 1,
+         type_icon TYPE dd02d-datatype,
+       END OF ty_fld.
+
+TYPES: BEGIN OF ty_csv,
+         line TYPE c LENGTH 4096,
+       END OF ty_csv.
+
+TYPES: BEGIN OF ty_lookup,
+         lookup_key TYPE c LENGTH 200,
+         lookup_val TYPE c LENGTH 4096,
+       END OF ty_lookup.
+
+DATA: gt_dd03p        TYPE STANDARD TABLE OF dd03p,
+      gs_dd03p        TYPE dd03p,
+      gt_fld          TYPE STANDARD TABLE OF ty_fld,
+      gs_fld          TYPE ty_fld,
+      gt_csv          TYPE STANDARD TABLE OF ty_csv,
+      gs_csv          TYPE ty_csv,
+      gt_options      TYPE STANDARD TABLE OF rfc_db_opt,
+      gt_fields       TYPE STANDARD TABLE OF rfc_db_fld,
+      gs_fields       TYPE rfc_db_fld,
+      gt_data         TYPE STANDARD TABLE OF tab512,
+      gs_data         TYPE tab512,
+      gv_file         TYPE string,
+      gv_header       TYPE c LENGTH 4096,
+      gv_tabname      TYPE tabname,
+      gv_selected_tab TYPE tabname,
+      gv_sep          TYPE c LENGTH 1,
+      gv_fcnt         TYPE i,
+      gv_cntxt        TYPE c LENGTH 10,
+      gv_tmpfile      TYPE string.
+
+* Zusatztabelle (Lookup / Join)
+DATA: gt_fld2          TYPE STANDARD TABLE OF ty_fld,
+      gs_fld2          TYPE ty_fld,
+      gt_dd03p2        TYPE STANDARD TABLE OF dd03p,
+      gt_fields2       TYPE STANDARD TABLE OF rfc_db_fld,
+      gt_options2      TYPE STANDARD TABLE OF rfc_db_opt,
+      gt_data2         TYPE STANDARD TABLE OF tab512,
+      gs_data2         TYPE tab512,
+      gv_tabname2      TYPE tabname,
+      gv_selected_tab2 TYPE tabname,
+      gv_fcnt2         TYPE i,
+      gv_fcnt2_extra   TYPE i,
+      gv_header2_extra TYPE c LENGTH 4096,
+      gv_empty2        TYPE c LENGTH 4096,
+      gt_lookup        TYPE STANDARD TABLE OF ty_lookup,
+      gs_lookup        TYPE ty_lookup.
+
+* Gesammelte Verknüpfungsfelder (bis zu 4 Paare, Composite Key)
+DATA: gt_jfh     TYPE STANDARD TABLE OF fieldname,
+      gt_jfz     TYPE STANDARD TABLE OF fieldname,
+      gv_key_sep TYPE c LENGTH 1 VALUE '#'.
+
+
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME.
+PARAMETERS: p_tab       TYPE tabname OBLIGATORY,
+            p_file      TYPE string OBLIGATORY,
+            p_flds(255) TYPE c NO-DISPLAY.
+
+SELECTION-SCREEN SKIP.
+SELECTION-SCREEN PUSHBUTTON /1(25) gv_btn USER-COMMAND feld.
+SELECTION-SCREEN COMMENT /1(70) gv_stat.
+SELECTION-SCREEN END OF BLOCK b1.
+
+SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME.
+PARAMETERS: p_tab2       TYPE tabname,
+            p_jf1h       TYPE fieldname,
+            p_jf1z       TYPE fieldname,
+            p_jf2h       TYPE fieldname,
+            p_jf2z       TYPE fieldname,
+            p_jf3h       TYPE fieldname,
+            p_jf3z       TYPE fieldname,
+            p_jf4h       TYPE fieldname,
+            p_jf4z       TYPE fieldname,
+            p_flds2(255) TYPE c NO-DISPLAY.
+
+SELECTION-SCREEN SKIP.
+SELECTION-SCREEN PUSHBUTTON /1(25) gv_btn2 USER-COMMAND feld2.
+SELECTION-SCREEN COMMENT /1(70) gv_stat2.
+SELECTION-SCREEN END OF BLOCK b2.
+
+SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME.
+PARAMETERS: p_flt1h  TYPE fieldname,
+            p_flt1hv TYPE c LENGTH 40,
+            p_flt1hb TYPE c LENGTH 40.
+SELECTION-SCREEN SKIP.
+PARAMETERS: p_flt2h  TYPE fieldname,
+            p_flt2hv TYPE c LENGTH 40,
+            p_flt2hb TYPE c LENGTH 40.
+SELECTION-SCREEN SKIP.
+PARAMETERS: p_flt1z  TYPE fieldname,
+            p_flt1zv TYPE c LENGTH 40,
+            p_flt1zb TYPE c LENGTH 40.
+SELECTION-SCREEN SKIP.
+PARAMETERS: p_flt2z  TYPE fieldname,
+            p_flt2zv TYPE c LENGTH 40,
+            p_flt2zb TYPE c LENGTH 40.
+SELECTION-SCREEN END OF BLOCK b3.
+
+
+INITIALIZATION.
+  %_p_tab_%_app_%-text  = 'Tabelle'.
+  %_p_file_%_app_%-text = 'Zieldatei SAP-Server / hW-HDD'.
+  %_p_tab2_%_app_%-text = 'Zusatztabelle (optional)'.
+  %_p_jf1h_%_app_%-text = 'Verkn.-Feld 1 Haupttabelle'.
+  %_p_jf1z_%_app_%-text = 'Verkn.-Feld 1 Zusatztabelle'.
+  %_p_jf2h_%_app_%-text = 'Verkn.-Feld 2 Haupttabelle'.
+  %_p_jf2z_%_app_%-text = 'Verkn.-Feld 2 Zusatztabelle'.
+  %_p_jf3h_%_app_%-text = 'Verkn.-Feld 3 Haupttabelle'.
+  %_p_jf3z_%_app_%-text = 'Verkn.-Feld 3 Zusatztabelle'.
+  %_p_jf4h_%_app_%-text = 'Verkn.-Feld 4 Haupttabelle'.
+  %_p_jf4z_%_app_%-text = 'Verkn.-Feld 4 Zusatztabelle'.
+  %_p_flt1h_%_app_%-text  = 'Filterfeld 1 Haupttabelle'.
+  %_p_flt1hv_%_app_%-text = 'Wert von (Filter 1 Haupt)'.
+  %_p_flt1hb_%_app_%-text = 'Wert bis (Filter 1 Haupt)'.
+  %_p_flt2h_%_app_%-text  = 'Filterfeld 2 Haupttabelle'.
+  %_p_flt2hv_%_app_%-text = 'Wert von (Filter 2 Haupt)'.
+  %_p_flt2hb_%_app_%-text = 'Wert bis (Filter 2 Haupt)'.
+  %_p_flt1z_%_app_%-text  = 'Filterfeld 1 Zusatztabelle'.
+  %_p_flt1zv_%_app_%-text = 'Wert von (Filter 1 Zusatz)'.
+  %_p_flt1zb_%_app_%-text = 'Wert bis (Filter 1 Zusatz)'.
+  %_p_flt2z_%_app_%-text  = 'Filterfeld 2 Zusatztabelle'.
+  %_p_flt2zv_%_app_%-text = 'Wert von (Filter 2 Zusatz)'.
+  %_p_flt2zb_%_app_%-text = 'Wert bis (Filter 2 Zusatz)'.
+  gv_sep   = '|'.
+  gv_btn   = 'Felder auswählen'.
+  gv_stat  = 'Noch keine Felder ausgewählt'.
+  gv_btn2  = 'Zusatzfelder auswählen'.
+  gv_stat2 = 'Keine Zusatztabelle gewählt'.
+
+
+AT SELECTION-SCREEN OUTPUT.
+
+  gv_btn  = 'Felder auswählen'.
+  gv_btn2 = 'Zusatzfelder auswählen'.
+
+  IF gv_fcnt IS INITIAL.
+    IF p_flds IS INITIAL.
+      gv_stat = 'Noch keine Felder ausgewählt'.
+    ELSE.
+      gv_stat = 'Feldliste aus Variante vorhanden'.
+    ENDIF.
+  ELSE.
+    CLEAR: gv_stat,
+           gv_cntxt.
+    WRITE gv_fcnt TO gv_cntxt LEFT-JUSTIFIED.
+    CONCATENATE 'Ausgewählte Felder:' gv_cntxt
+           INTO gv_stat SEPARATED BY space.
+    IF gv_selected_tab IS NOT INITIAL.
+      CONCATENATE gv_stat 'für Tabelle' gv_selected_tab
+             INTO gv_stat SEPARATED BY space.
+    ENDIF.
+  ENDIF.
+
+  IF p_tab2 IS INITIAL.
+    gv_stat2 = 'Keine Zusatztabelle gewählt'.
+  ELSEIF gv_fcnt2 IS INITIAL.
+    IF p_flds2 IS INITIAL.
+      gv_stat2 = 'Noch keine Zusatzfelder ausgewählt'.
+    ELSE.
+      gv_stat2 = 'Zusatzfeldliste aus Variante vorhanden'.
+    ENDIF.
+  ELSE.
+    CLEAR: gv_stat2,
+           gv_cntxt.
+    WRITE gv_fcnt2 TO gv_cntxt LEFT-JUSTIFIED.
+    CONCATENATE 'Ausgewählte Zusatzfelder:' gv_cntxt
+           INTO gv_stat2 SEPARATED BY space.
+    IF gv_selected_tab2 IS NOT INITIAL.
+      CONCATENATE gv_stat2 'für Tabelle' gv_selected_tab2
+             INTO gv_stat2 SEPARATED BY space.
+    ENDIF.
+  ENDIF.
+
+AT SELECTION-SCREEN.
+
+  CASE sy-ucomm.
+    WHEN 'FELD'.
+
+      IF p_tab IS INITIAL.
+        MESSAGE 'Bitte zuerst eine Tabelle eingeben' TYPE 'I'.
+        LEAVE SCREEN.
+      ENDIF.
+
+      gv_tabname = p_tab.
+      TRANSLATE gv_tabname TO UPPER CASE.
+
+      PERFORM check_table_exists.
+      PERFORM read_field_catalog.
+      PERFORM popup_select_fields.
+      PERFORM count_selected_fields.
+      PERFORM save_field_list.
+
+      gv_selected_tab = gv_tabname.
+      LEAVE SCREEN.
+
+    WHEN 'FELD2'.
+
+      IF p_tab2 IS INITIAL.
+        MESSAGE 'Bitte zuerst eine Zusatztabelle eingeben' TYPE 'I'.
+        LEAVE SCREEN.
+      ENDIF.
+
+      gv_tabname2 = p_tab2.
+      TRANSLATE gv_tabname2 TO UPPER CASE.
+
+      PERFORM check_table_exists_2.
+      PERFORM read_field_catalog_2.
+      PERFORM popup_select_fields_2.
+      PERFORM count_selected_fields_2.
+      PERFORM save_field_list_2.
+
+      gv_selected_tab2 = gv_tabname2.
+      LEAVE SCREEN.
+
+  ENDCASE.
+
+START-OF-SELECTION.
+
+  gv_tabname = p_tab.
+  TRANSLATE gv_tabname TO UPPER CASE.
+
+  IF gt_fld IS INITIAL AND p_flds IS NOT INITIAL.
+    PERFORM check_table_exists.
+    PERFORM read_field_catalog.
+    PERFORM restore_field_list.
+  ENDIF.
+
+  IF gt_fld IS INITIAL.
+    MESSAGE 'Bitte zuerst Felder über den Button auswählen' TYPE 'E'.
+  ENDIF.
+
+  IF gv_selected_tab IS NOT INITIAL AND gv_selected_tab NE gv_tabname.
+    MESSAGE 'Tabelle wurde geändert; bitte Felder erneut auswählen' TYPE 'E'.
+  ENDIF.
+
+* Optionale Zusatztabelle (Lookup/Join)
+  IF p_tab2 IS NOT INITIAL.
+
+    gv_tabname2 = p_tab2.
+    TRANSLATE gv_tabname2 TO UPPER CASE.
+
+    PERFORM collect_join_fields.
+
+    IF gt_fld2 IS INITIAL AND p_flds2 IS NOT INITIAL.
+      PERFORM check_table_exists_2.
+      PERFORM read_field_catalog_2.
+      PERFORM restore_field_list_2.
+    ENDIF.
+
+    IF gt_fld2 IS INITIAL.
+      MESSAGE 'Bitte zuerst Zusatzfelder über den Button auswählen' TYPE 'E'.
+    ENDIF.
+
+    IF gv_selected_tab2 IS NOT INITIAL AND gv_selected_tab2 NE gv_tabname2.
+      MESSAGE 'Zusatztabelle wurde geändert; bitte Zusatzfelder erneut auswählen' TYPE 'E'.
+    ENDIF.
+
+    PERFORM prepare_rfc_fields_2.
+    PERFORM read_table_data_2.
+    PERFORM build_lookup_table.
+
+  ENDIF.
+
+  PERFORM prepare_rfc_fields.
+
+  IF p_tab2 IS NOT INITIAL AND gv_header2_extra IS NOT INITIAL.
+    CONCATENATE gv_header gv_header2_extra INTO gv_header SEPARATED BY gv_sep.
+  ENDIF.
+
+  PERFORM read_table_data.
+  PERFORM build_download_table.
+  PERFORM download_file.
+
+FORM collect_join_fields.
+
+* Sammelt bis zu 4 Verknüpfungsfeldpaare (Haupttabelle/Zusatztabelle)
+* in gt_jfh / gt_jfz. Jedes Paar muss vollständig gefüllt oder
+* vollständig leer sein. Mindestens Paar 1 muss gefüllt sein.
+
+  REFRESH: gt_jfh, gt_jfz.
+
+  IF p_jf1h IS NOT INITIAL OR p_jf1z IS NOT INITIAL.
+    IF p_jf1h IS INITIAL OR p_jf1z IS INITIAL.
+      MESSAGE 'Verknüpfungsfeldpaar 1: Haupt- und Zusatztabellenfeld müssen beide gefüllt sein' TYPE 'E'.
+    ENDIF.
+    APPEND p_jf1h TO gt_jfh.
+    APPEND p_jf1z TO gt_jfz.
+  ENDIF.
+
+  IF p_jf2h IS NOT INITIAL OR p_jf2z IS NOT INITIAL.
+    IF p_jf2h IS INITIAL OR p_jf2z IS INITIAL.
+      MESSAGE 'Verknüpfungsfeldpaar 2: Haupt- und Zusatztabellenfeld müssen beide gefüllt sein' TYPE 'E'.
+    ENDIF.
+    APPEND p_jf2h TO gt_jfh.
+    APPEND p_jf2z TO gt_jfz.
+  ENDIF.
+
+  IF p_jf3h IS NOT INITIAL OR p_jf3z IS NOT INITIAL.
+    IF p_jf3h IS INITIAL OR p_jf3z IS INITIAL.
+      MESSAGE 'Verknüpfungsfeldpaar 3: Haupt- und Zusatztabellenfeld müssen beide gefüllt sein' TYPE 'E'.
+    ENDIF.
+    APPEND p_jf3h TO gt_jfh.
+    APPEND p_jf3z TO gt_jfz.
+  ENDIF.
+
+  IF p_jf4h IS NOT INITIAL OR p_jf4z IS NOT INITIAL.
+    IF p_jf4h IS INITIAL OR p_jf4z IS INITIAL.
+      MESSAGE 'Verknüpfungsfeldpaar 4: Haupt- und Zusatztabellenfeld müssen beide gefüllt sein' TYPE 'E'.
+    ENDIF.
+    APPEND p_jf4h TO gt_jfh.
+    APPEND p_jf4z TO gt_jfz.
+  ENDIF.
+
+  IF gt_jfh IS INITIAL.
+    MESSAGE 'Bitte mindestens ein Verknüpfungsfeldpaar für Haupt- und Zusatztabelle angeben' TYPE 'E'.
+  ENDIF.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& Forms für optionale Selektionsfilter (WHERE-Bedingungen)
+*&---------------------------------------------------------------------*
+
+FORM convert_date_value CHANGING cv_val TYPE c.
+
+* Wandelt eine Eingabe im Format TT.MM.JJJJ in das interne
+* Datumsformat JJJJMMTT um. Andere Formate (z. B. bereits JJJJMMTT)
+* bleiben unverändert.
+
+  DATA: lv_len TYPE i.
+
+  CONDENSE cv_val.
+  lv_len = strlen( cv_val ).
+
+  IF lv_len EQ 10 AND cv_val+2(1) EQ '.' AND cv_val+5(1) EQ '.'.
+    DATA(lv_new) = cv_val+6(4) && cv_val+3(2) && cv_val+0(2).
+    cv_val = lv_new.
+  ENDIF.
+
+ENDFORM.
+
+FORM append_where_line USING pv_clause TYPE string
+                     CHANGING ct_options TYPE STANDARD TABLE.
+
+* Hängt einen WHERE-Textbaustein an die RFC_READ_TABLE-OPTIONS an.
+* RFC_READ_TABLE fügt alle TEXT-Zeilen beim Aufbau der Bedingung
+* einfach aneinander, daher ist ein Umbruch an einer beliebigen
+* Zeichenposition (max. 72 Zeichen je Zeile) unkritisch.
+
+  DATA: lv_rest TYPE string,
+        lv_len  TYPE i,
+        ls_opt  TYPE rfc_db_opt.
+
+  lv_rest = pv_clause.
+
+  WHILE strlen( lv_rest ) > 0.
+    lv_len = strlen( lv_rest ).
+    IF lv_len > 72.
+      lv_len = 72.
+    ENDIF.
+
+    CLEAR ls_opt.
+    ls_opt-text = lv_rest(lv_len).
+    APPEND ls_opt TO ct_options.
+
+    lv_rest = lv_rest+lv_len.
+  ENDWHILE.
+
+ENDFORM.
+
+FORM add_range_filter USING pv_field    TYPE fieldname
+                             pv_von     TYPE c
+                             pv_bis     TYPE c
+                             pv_use_main TYPE c
+                     CHANGING ct_options TYPE STANDARD TABLE.
+
+* Baut aus Feldname + Wert von/bis einen WHERE-Baustein und hängt
+* ihn (ggf. mit vorangestelltem AND) an ct_options an. pv_use_main =
+* 'X' -> Datentyp aus dem Katalog der Haupttabelle (gt_dd03p)
+* ermitteln, sonst aus dem der Zusatztabelle (gt_dd03p2). Bei
+* Datumsfeldern (INTTYPE 'D') wird TT.MM.JJJJ automatisch gewandelt.
+* Ist nur "von" oder nur "bis" gefüllt, wird >= bzw. <= verwendet,
+* sind beide gefüllt, wird ein Bereich (>= ... AND <= ...) gebildet.
+
+  DATA: lv_field   TYPE fieldname,
+        lv_inttype TYPE dd03p-inttype,
+        lv_von     TYPE c LENGTH 40,
+        lv_bis     TYPE c LENGTH 40,
+        lv_clause  TYPE string,
+        ls_main    TYPE dd03p,
+        ls_zusatz  TYPE dd03p.
+
+  IF pv_field IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  IF pv_von IS INITIAL AND pv_bis IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  lv_field = pv_field.
+  TRANSLATE lv_field TO UPPER CASE.
+
+  CLEAR lv_inttype.
+  IF pv_use_main EQ 'X'.
+    READ TABLE gt_dd03p INTO ls_main WITH KEY fieldname = lv_field.
+    IF sy-subrc EQ 0.
+      lv_inttype = ls_main-inttype.
+    ENDIF.
+  ELSE.
+    READ TABLE gt_dd03p2 INTO ls_zusatz WITH KEY fieldname = lv_field.
+    IF sy-subrc EQ 0.
+      lv_inttype = ls_zusatz-inttype.
+    ENDIF.
+  ENDIF.
+
+  lv_von = pv_von.
+  lv_bis = pv_bis.
+
+  IF lv_inttype EQ 'D'.
+    PERFORM convert_date_value CHANGING lv_von.
+    PERFORM convert_date_value CHANGING lv_bis.
+  ENDIF.
+
+  CONDENSE lv_von.
+  CONDENSE lv_bis.
+
+  CLEAR lv_clause.
+  IF lv_von IS NOT INITIAL AND lv_bis IS NOT INITIAL.
+    lv_clause = |{ lv_field } >= '{ lv_von }' AND { lv_field } <= '{ lv_bis }'|.
+  ELSEIF lv_von IS NOT INITIAL.
+    lv_clause = |{ lv_field } >= '{ lv_von }'|.
+  ELSEIF lv_bis IS NOT INITIAL.
+    lv_clause = |{ lv_field } <= '{ lv_bis }'|.
+  ENDIF.
+
+  IF lv_clause IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  IF lines( ct_options ) > 0.
+    lv_clause = |AND { lv_clause }|.
+  ENDIF.
+
+  PERFORM append_where_line USING lv_clause CHANGING ct_options.
+
+ENDFORM.
+
+FORM build_main_where_options CHANGING ct_options TYPE STANDARD TABLE.
+
+  PERFORM add_range_filter USING p_flt1h p_flt1hv p_flt1hb 'X'
+                          CHANGING ct_options.
+  PERFORM add_range_filter USING p_flt2h p_flt2hv p_flt2hb 'X'
+                          CHANGING ct_options.
+
+ENDFORM.
+
+FORM build_zusatz_where_options CHANGING ct_options TYPE STANDARD TABLE.
+
+  PERFORM add_range_filter USING p_flt1z p_flt1zv p_flt1zb space
+                          CHANGING ct_options.
+  PERFORM add_range_filter USING p_flt2z p_flt2zv p_flt2zb space
+                          CHANGING ct_options.
+
+ENDFORM.
+
+FORM check_table_exists.
+
+  DATA: lv_tabclass TYPE dd02l-tabclass.
+
+  CLEAR lv_tabclass.
+
+  SELECT SINGLE tabclass
+    INTO lv_tabclass
+    FROM dd02l
+    WHERE tabname  = gv_tabname
+      AND as4local = 'A'
+      AND as4vers  = '0000'.
+
+  IF sy-subrc NE 0.
+    MESSAGE 'Tabelle wurde im DDIC nicht gefunden oder ist nicht aktiv' TYPE 'E'.
+  ENDIF.
+
+  IF lv_tabclass NE 'TRANSP' AND lv_tabclass NE 'VIEW'.
+    MESSAGE 'Es sind nur transparente Tabellen oder Views vorgesehen' TYPE 'E'.
+  ENDIF.
+
+ENDFORM.
+
+FORM read_field_catalog.
+
+  DATA: ls_get_state TYPE dctablget,
+        lv_lines     TYPE i.
+
+  REFRESH gt_dd03p.
+  REFRESH gt_fld.
+  CLEAR ls_get_state.
+
+  ls_get_state-tabd = 'A'.
+  ls_get_state-tabt = 'A'.
+
+  CALL FUNCTION 'DD_TABL_GET'
+    EXPORTING
+      get_state    = ls_get_state
+      prid         = -2
+      tabl_name    = gv_tabname
+      withtext     = 'X'
+      add_typeinfo = 'X'
+    TABLES
+      dd03p_tab_a  = gt_dd03p
+    EXCEPTIONS
+      OTHERS       = 1.
+
+  DESCRIBE TABLE gt_dd03p LINES lv_lines.
+
+  IF sy-subrc NE 0 OR lv_lines IS INITIAL.
+    MESSAGE 'Feldinformationen konnten nicht gelesen werden' TYPE 'E'.
+  ENDIF.
+
+  LOOP AT gt_dd03p INTO gs_dd03p.
+    CLEAR gs_fld.
+    MOVE-CORRESPONDING gs_dd03p TO gs_fld.
+    APPEND gs_fld TO gt_fld.
+  ENDLOOP.
+
+* .INCLUDE, .APPEND und technische Zeilen entfernen
+  DELETE gt_fld WHERE inttype IS INITIAL.
+
+ENDFORM.
+
+FORM popup_select_fields.
+
+  CALL FUNCTION 'DD_LIST_TABFIELDS'
+    EXPORTING
+      eutype       = 'V'
+      p_with_type  = 'X'
+    TABLES
+      fieldtab     = gt_fld
+    EXCEPTIONS
+      not_executed = 1
+      OTHERS       = 2.
+
+  IF sy-subrc NE 0.
+    MESSAGE 'Feldauswahl wurde abgebrochen oder konnte nicht gestartet werden' TYPE 'E'.
+  ENDIF.
+
+  DELETE gt_fld WHERE mark IS INITIAL.
+
+  IF gt_fld IS INITIAL.
+    MESSAGE 'Es wurden keine Felder ausgewählt' TYPE 'E'.
+  ENDIF.
+
+ENDFORM.
+
+FORM count_selected_fields.
+
+  DESCRIBE TABLE gt_fld LINES gv_fcnt.
+
+ENDFORM.
+
+FORM save_field_list.
+
+  DATA: lv_len1 TYPE i,
+        lv_len2 TYPE i,
+        lv_sum  TYPE i.
+
+  CLEAR p_flds.
+
+* Feldliste mit führendem und abschliessendem Komma speichern.
+* Dadurch kann beim Wiederherstellen exakt gesucht werden.
+* Beispiel: ,MANDT,AUFNR,ERDAT,
+  LOOP AT gt_fld INTO gs_fld.
+
+    lv_len1 = STRLEN( p_flds ).
+    lv_len2 = STRLEN( gs_fld-fieldname ).
+    lv_sum  = lv_len1 + lv_len2 + 1.
+
+    IF lv_sum GT 255.
+      MESSAGE 'Feldliste für Variante ist länger als 255 Zeichen; Auswahl wurde gekürzt' TYPE 'I'.
+      EXIT.
+    ENDIF.
+
+    IF p_flds IS INITIAL.
+      CONCATENATE ',' gs_fld-fieldname ',' INTO p_flds.
+    ELSE.
+      CONCATENATE p_flds gs_fld-fieldname ',' INTO p_flds.
+    ENDIF.
+
+  ENDLOOP.
+
+ENDFORM.
+
+FORM restore_field_list.
+
+  DATA: lv_find TYPE c LENGTH 40.
+
+  LOOP AT gt_fld INTO gs_fld.
+
+    CLEAR lv_find.
+    CONCATENATE ',' gs_fld-fieldname ',' INTO lv_find.
+
+    IF p_flds CS lv_find.
+      gs_fld-mark = 'X'.
+      MODIFY gt_fld FROM gs_fld.
+    ENDIF.
+
+  ENDLOOP.
+
+  DELETE gt_fld WHERE mark IS INITIAL.
+  DESCRIBE TABLE gt_fld LINES gv_fcnt.
+
+  gv_selected_tab = gv_tabname.
+
+ENDFORM.
+
+FORM prepare_rfc_fields.
+
+  REFRESH gt_fields.
+  CLEAR gv_header.
+
+  LOOP AT gt_fld INTO gs_fld.
+
+    CLEAR gs_fields.
+    gs_fields-fieldname = gs_fld-fieldname.
+    APPEND gs_fields TO gt_fields.
+
+    IF gv_header IS INITIAL.
+      gv_header = gs_fld-fieldname.
+    ELSE.
+      CONCATENATE gv_header gs_fld-fieldname INTO gv_header
+        SEPARATED BY gv_sep.
+    ENDIF.
+
+  ENDLOOP.
+
+ENDFORM.
+
+FORM read_table_data.
+
+  REFRESH gt_options.
+  REFRESH gt_data.
+
+  PERFORM build_main_where_options CHANGING gt_options.
+
+* Kein CLIENT SPECIFIED, keine explizite Zeilenbegrenzung.
+* RFC_READ_TABLE liest mandantenabhängige Tabellen im aktuellen Mandanten.
+* Optionale WHERE-Bedingung siehe build_main_where_options (Filterfelder).
+  CALL FUNCTION 'RFC_READ_TABLE'
+    EXPORTING
+      query_table          = gv_tabname
+      delimiter            = gv_sep
+      no_data              = space
+      rowskips             = 0
+      rowcount             = 0
+    TABLES
+      options              = gt_options
+      fields               = gt_fields
+      data                 = gt_data
+    EXCEPTIONS
+      table_not_available  = 1
+      table_without_data   = 2
+      option_not_valid     = 3
+      field_not_valid      = 4
+      not_authorized       = 5
+      data_buffer_exceeded = 6
+      OTHERS               = 7.
+
+  IF sy-subrc EQ 1.
+    MESSAGE 'Tabelle ist nicht verfügbar' TYPE 'E'.
+  ELSEIF sy-subrc EQ 2.
+    MESSAGE 'Tabelle enthält keine Daten' TYPE 'S'.
+  ELSEIF sy-subrc EQ 3.
+    MESSAGE 'Selektion ist ungültig' TYPE 'E'.
+  ELSEIF sy-subrc EQ 4.
+    MESSAGE 'Mindestens ein Feld ist ungültig' TYPE 'E'.
+  ELSEIF sy-subrc EQ 5.
+    MESSAGE 'Keine Berechtigung für den Tabellenzugriff' TYPE 'E'.
+  ELSEIF sy-subrc EQ 6.
+    MESSAGE 'Ergebniszeile ist zu breit für RFC_READ_TABLE; weniger Felder auswählen' TYPE 'E'.
+  ELSEIF sy-subrc NE 0.
+    MESSAGE 'Fehler beim Lesen der Tabelle' TYPE 'E'.
+  ENDIF.
+
+ENDFORM.
+
+FORM build_download_table.
+
+  DATA: lt_jfh_pos  TYPE STANDARD TABLE OF i,
+        lv_pos      TYPE i,
+        lv_idx      TYPE i,
+        lv_i        TYPE i,
+        lv_jfh      TYPE fieldname,
+        lt_parts    TYPE STANDARD TABLE OF string,
+        lv_part     TYPE string,
+        lv_key      TYPE c LENGTH 200,
+        lv_key_part TYPE c LENGTH 200,
+        lv_value    TYPE c LENGTH 4096,
+        lv_found    TYPE c LENGTH 1,
+        lv_datum    TYPE c LENGTH 10,
+        lv_uhrzeit  TYPE c LENGTH 8.
+
+  REFRESH gt_csv.
+
+  IF p_tab2 IS NOT INITIAL.
+
+*   Positionen aller Verknüpfungsfelder innerhalb der ausgewählten
+*   Hauptfelder ermitteln (für den Split der Pipe-Zeile), in der
+*   Reihenfolge von gt_jfh (= Reihenfolge der Feldpaare 1..4)
+    REFRESH lt_jfh_pos.
+
+    LOOP AT gt_jfh INTO lv_jfh.
+
+      CLEAR lv_pos.
+      lv_idx = 0.
+      LOOP AT gt_fld INTO gs_fld.
+        lv_idx = lv_idx + 1.
+        IF gs_fld-fieldname = lv_jfh.
+          lv_pos = lv_idx.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+
+      IF lv_pos IS INITIAL.
+        MESSAGE 'Ein Verknüpfungsfeld der Haupttabelle ist nicht in der Feldauswahl enthalten' TYPE 'E'.
+      ENDIF.
+
+      APPEND lv_pos TO lt_jfh_pos.
+
+    ENDLOOP.
+
+  ENDIF.
+
+* Info-Kopfzeile: Erstellungsdatum/-zeit des Exports
+  CONCATENATE sy-datum+6(2) '.' sy-datum+4(2) '.' sy-datum(4) INTO lv_datum.
+  CONCATENATE sy-uzeit(2) ':' sy-uzeit+2(2) ':' sy-uzeit+4(2) INTO lv_uhrzeit.
+
+  CLEAR gs_csv.
+  gs_csv-line = |Erstellt am { lv_datum } { lv_uhrzeit }|.
+  APPEND gs_csv TO gt_csv.
+
+* Kopfzeile (Spaltennamen)
+  CLEAR gs_csv.
+  gs_csv-line = gv_header.
+  APPEND gs_csv TO gt_csv.
+
+* Datenzeilen
+  LOOP AT gt_data INTO gs_data.
+
+    CLEAR gs_csv.
+    gs_csv-line = gs_data-wa.
+
+    IF p_tab2 IS NOT INITIAL.
+
+      REFRESH lt_parts.
+      SPLIT gs_data-wa AT gv_sep INTO TABLE lt_parts.
+
+*     Zusammengesetzten Schlüssel aus allen Verknüpfungsfeldern
+*     der Haupttabelle bilden (gleiche Reihenfolge/Trenner wie
+*     beim Aufbau von gt_lookup in build_lookup_table)
+      CLEAR lv_key.
+      lv_i = 0.
+      LOOP AT lt_jfh_pos INTO lv_pos.
+        lv_i = lv_i + 1.
+        CLEAR lv_key_part.
+        READ TABLE lt_parts INTO lv_part INDEX lv_pos.
+        IF sy-subrc EQ 0.
+          lv_key_part = lv_part.
+          CONDENSE lv_key_part.
+        ENDIF.
+        IF lv_i EQ 1.
+          lv_key = lv_key_part.
+        ELSE.
+          CONCATENATE lv_key gv_key_sep lv_key_part INTO lv_key.
+        ENDIF.
+      ENDLOOP.
+
+      CLEAR: lv_value, lv_found.
+      READ TABLE gt_lookup INTO gs_lookup WITH KEY lookup_key = lv_key.
+      IF sy-subrc EQ 0.
+        lv_value = gs_lookup-lookup_val.
+        lv_found = 'X'.
+      ENDIF.
+
+      IF lv_found IS INITIAL.
+        lv_value = gv_empty2.
+      ENDIF.
+
+      CONCATENATE gs_csv-line lv_value INTO gs_csv-line SEPARATED BY gv_sep.
+
+    ENDIF.
+
+    APPEND gs_csv TO gt_csv.
+
+  ENDLOOP.
+
+ENDFORM.
+
+FORM download_file.
+
+  OPEN DATASET p_file
+    FOR OUTPUT
+    IN TEXT MODE
+    ENCODING DEFAULT.
+  IF sy-subrc NE 0.
+    MESSAGE 'Serverdatei konnte nicht geoeffnet werden' TYPE 'E'.
+  ENDIF.
+
+  LOOP AT gt_csv INTO gs_csv.
+    TRANSFER gs_csv-line TO p_file.
+    IF sy-subrc NE 0.
+      CLOSE DATASET p_file.
+      MESSAGE 'Fehler beim Schreiben der Serverdatei' TYPE 'E'.
+    ENDIF.
+  ENDLOOP.
+
+  CLOSE DATASET p_file.
+
+  MESSAGE 'Datei erfolgreich auf dem Applikationsserver erstellt' TYPE 'S'.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& Forms für Zusatztabelle (Lookup / Join)
+*&---------------------------------------------------------------------*
+
+FORM check_table_exists_2.
+
+  DATA: lv_tabclass TYPE dd02l-tabclass.
+
+  CLEAR lv_tabclass.
+
+  SELECT SINGLE tabclass
+    INTO lv_tabclass
+    FROM dd02l
+    WHERE tabname  = gv_tabname2
+      AND as4local = 'A'
+      AND as4vers  = '0000'.
+
+  IF sy-subrc NE 0.
+    MESSAGE 'Zusatztabelle wurde im DDIC nicht gefunden oder ist nicht aktiv' TYPE 'E'.
+  ENDIF.
+
+  IF lv_tabclass NE 'TRANSP' AND lv_tabclass NE 'VIEW'.
+    MESSAGE 'Es sind nur transparente Tabellen oder Views als Zusatztabelle vorgesehen' TYPE 'E'.
+  ENDIF.
+
+ENDFORM.
+
+FORM read_field_catalog_2.
+
+  DATA: ls_get_state TYPE dctablget,
+        lv_lines     TYPE i,
+        lt_dd03p     TYPE STANDARD TABLE OF dd03p,
+        ls_dd03p     TYPE dd03p.
+
+  REFRESH gt_fld2.
+  REFRESH gt_dd03p2.
+  CLEAR ls_get_state.
+
+  ls_get_state-tabd = 'A'.
+  ls_get_state-tabt = 'A'.
+
+  CALL FUNCTION 'DD_TABL_GET'
+    EXPORTING
+      get_state    = ls_get_state
+      prid         = -2
+      tabl_name    = gv_tabname2
+      withtext     = 'X'
+      add_typeinfo = 'X'
+    TABLES
+      dd03p_tab_a  = lt_dd03p
+    EXCEPTIONS
+      OTHERS       = 1.
+
+  DESCRIBE TABLE lt_dd03p LINES lv_lines.
+
+  IF sy-subrc NE 0 OR lv_lines IS INITIAL.
+    MESSAGE 'Feldinformationen der Zusatztabelle konnten nicht gelesen werden' TYPE 'E'.
+  ENDIF.
+
+* Vollständigen Feldkatalog sichern (auch für Filterfelder, die
+* nicht als Ausgabespalte ausgewählt werden)
+  gt_dd03p2 = lt_dd03p.
+
+  LOOP AT lt_dd03p INTO ls_dd03p.
+    CLEAR gs_fld2.
+    MOVE-CORRESPONDING ls_dd03p TO gs_fld2.
+    APPEND gs_fld2 TO gt_fld2.
+  ENDLOOP.
+
+  DELETE gt_fld2 WHERE inttype IS INITIAL.
+
+ENDFORM.
+
+FORM popup_select_fields_2.
+
+  CALL FUNCTION 'DD_LIST_TABFIELDS'
+    EXPORTING
+      eutype       = 'V'
+      p_with_type  = 'X'
+    TABLES
+      fieldtab     = gt_fld2
+    EXCEPTIONS
+      not_executed = 1
+      OTHERS       = 2.
+
+  IF sy-subrc NE 0.
+    MESSAGE 'Feldauswahl der Zusatztabelle wurde abgebrochen oder konnte nicht gestartet werden' TYPE 'E'.
+  ENDIF.
+
+  DELETE gt_fld2 WHERE mark IS INITIAL.
+
+  IF gt_fld2 IS INITIAL.
+    MESSAGE 'Es wurden keine Zusatzfelder ausgewählt' TYPE 'E'.
+  ENDIF.
+
+ENDFORM.
+
+FORM count_selected_fields_2.
+
+  DESCRIBE TABLE gt_fld2 LINES gv_fcnt2.
+
+ENDFORM.
+
+FORM save_field_list_2.
+
+  DATA: lv_len1 TYPE i,
+        lv_len2 TYPE i,
+        lv_sum  TYPE i.
+
+  CLEAR p_flds2.
+
+  LOOP AT gt_fld2 INTO gs_fld2.
+
+    lv_len1 = STRLEN( p_flds2 ).
+    lv_len2 = STRLEN( gs_fld2-fieldname ).
+    lv_sum  = lv_len1 + lv_len2 + 1.
+
+    IF lv_sum GT 255.
+      MESSAGE 'Zusatzfeldliste fuer Variante ist länger als 255 Zeichen; Auswahl wurde gekürzt' TYPE 'I'.
+      EXIT.
+    ENDIF.
+
+    IF p_flds2 IS INITIAL.
+      CONCATENATE ',' gs_fld2-fieldname ',' INTO p_flds2.
+    ELSE.
+      CONCATENATE p_flds2 gs_fld2-fieldname ',' INTO p_flds2.
+    ENDIF.
+
+  ENDLOOP.
+
+ENDFORM.
+
+FORM restore_field_list_2.
+
+  DATA: lv_find TYPE c LENGTH 40.
+
+  LOOP AT gt_fld2 INTO gs_fld2.
+
+    CLEAR lv_find.
+    CONCATENATE ',' gs_fld2-fieldname ',' INTO lv_find.
+
+    IF p_flds2 CS lv_find.
+      gs_fld2-mark = 'X'.
+      MODIFY gt_fld2 FROM gs_fld2.
+    ENDIF.
+
+  ENDLOOP.
+
+  DELETE gt_fld2 WHERE mark IS INITIAL.
+  DESCRIBE TABLE gt_fld2 LINES gv_fcnt2.
+
+  gv_selected_tab2 = gv_tabname2.
+
+ENDFORM.
+
+FORM prepare_rfc_fields_2.
+
+  DATA: lv_jfz TYPE fieldname.
+
+  REFRESH gt_fields2.
+  CLEAR: gv_header2_extra, gv_fcnt2_extra, gv_empty2.
+
+* Alle Verknüpfungsfelder der Zusatztabelle werden immer zuerst
+* gelesen (in der Reihenfolge von gt_jfz; bilden zusammen den
+* Schlüssel für den Lookup)
+  LOOP AT gt_jfz INTO lv_jfz.
+    CLEAR gs_fields.
+    gs_fields-fieldname = lv_jfz.
+    APPEND gs_fields TO gt_fields2.
+  ENDLOOP.
+
+  LOOP AT gt_fld2 INTO gs_fld2.
+
+    READ TABLE gt_jfz WITH KEY table_line = gs_fld2-fieldname TRANSPORTING NO FIELDS.
+    IF sy-subrc EQ 0.
+      CONTINUE.
+    ENDIF.
+
+    CLEAR gs_fields.
+    gs_fields-fieldname = gs_fld2-fieldname.
+    APPEND gs_fields TO gt_fields2.
+
+    gv_fcnt2_extra = gv_fcnt2_extra + 1.
+
+    IF gv_header2_extra IS INITIAL.
+      gv_header2_extra = gs_fld2-fieldname.
+    ELSE.
+      CONCATENATE gv_header2_extra gs_fld2-fieldname INTO gv_header2_extra
+        SEPARATED BY gv_sep.
+    ENDIF.
+
+  ENDLOOP.
+
+  IF gv_fcnt2_extra IS INITIAL.
+    MESSAGE 'Es wurde kein Ausgabefeld für die Zusatztabelle ausgewählt' TYPE 'E'.
+  ENDIF.
+
+* Leerplatzhalter für nicht gefundene Verknüpfungen
+  CLEAR gv_empty2.
+  DO gv_fcnt2_extra TIMES.
+    IF sy-index EQ 1.
+      gv_empty2 = ''.
+    ELSE.
+      CONCATENATE gv_empty2 gv_sep INTO gv_empty2.
+    ENDIF.
+  ENDDO.
+
+ENDFORM.
+
+FORM read_table_data_2.
+
+  REFRESH: gt_options2, gt_data2.
+
+  PERFORM build_zusatz_where_options CHANGING gt_options2.
+
+  CALL FUNCTION 'RFC_READ_TABLE'
+    EXPORTING
+      query_table          = gv_tabname2
+      delimiter            = gv_sep
+      no_data              = space
+      rowskips             = 0
+      rowcount             = 0
+    TABLES
+      options              = gt_options2
+      fields               = gt_fields2
+      data                 = gt_data2
+    EXCEPTIONS
+      table_not_available  = 1
+      table_without_data   = 2
+      option_not_valid     = 3
+      field_not_valid      = 4
+      not_authorized       = 5
+      data_buffer_exceeded = 6
+      OTHERS               = 7.
+
+  IF sy-subrc EQ 1.
+    MESSAGE 'Zusatztabelle ist nicht verfügbar' TYPE 'E'.
+  ELSEIF sy-subrc EQ 2.
+*   Zusatztabelle ohne Daten ist kein Abbruchgrund, Lookup bleibt leer
+    CLEAR sy-subrc.
+  ELSEIF sy-subrc EQ 3.
+    MESSAGE 'Selektion der Zusatztabelle ist ungültig' TYPE 'E'.
+  ELSEIF sy-subrc EQ 4.
+    MESSAGE 'Mindestens ein Feld der Zusatztabelle ist ungültig' TYPE 'E'.
+  ELSEIF sy-subrc EQ 5.
+    MESSAGE 'Keine Berechtigung für den Zugriff auf die Zusatztabelle' TYPE 'E'.
+  ELSEIF sy-subrc EQ 6.
+    MESSAGE 'Ergebniszeile der Zusatztabelle ist zu breit; weniger Zusatzfelder auswählen' TYPE 'E'.
+  ELSEIF sy-subrc NE 0.
+    MESSAGE 'Fehler beim Lesen der Zusatztabelle' TYPE 'E'.
+  ENDIF.
+
+ENDFORM.
+
+FORM build_lookup_table.
+
+  DATA: lt_parts    TYPE STANDARD TABLE OF string,
+        lv_part     TYPE string,
+        lv_key      TYPE c LENGTH 200,
+        lv_key_part TYPE c LENGTH 200,
+        lv_value    TYPE c LENGTH 4096,
+        lv_first    TYPE c LENGTH 1,
+        lv_jf_cnt   TYPE i,
+        lv_start    TYPE i,
+        lv_idx      TYPE i.
+
+  REFRESH gt_lookup.
+
+  DESCRIBE TABLE gt_jfz LINES lv_jf_cnt.
+  lv_start = lv_jf_cnt + 1.
+
+  LOOP AT gt_data2 INTO gs_data2.
+
+    REFRESH lt_parts.
+    SPLIT gs_data2-wa AT gv_sep INTO TABLE lt_parts.
+
+*   Zusammengesetzten Schlüssel aus den ersten lv_jf_cnt Werten
+*   bilden (= die Verknüpfungsfelder, siehe prepare_rfc_fields_2)
+    CLEAR lv_key.
+    DO lv_jf_cnt TIMES.
+      lv_idx = sy-index.
+      CLEAR lv_key_part.
+      READ TABLE lt_parts INTO lv_part INDEX lv_idx.
+      IF sy-subrc EQ 0.
+        lv_key_part = lv_part.
+        CONDENSE lv_key_part.
+      ENDIF.
+      IF lv_idx EQ 1.
+        lv_key = lv_key_part.
+      ELSE.
+        CONCATENATE lv_key gv_key_sep lv_key_part INTO lv_key.
+      ENDIF.
+    ENDDO.
+
+    CLEAR: lv_value, lv_first.
+    lv_first = 'X'.
+
+    LOOP AT lt_parts INTO lv_part FROM lv_start.
+      IF lv_first EQ 'X'.
+        lv_value = lv_part.
+        lv_first = space.
+      ELSE.
+        CONCATENATE lv_value lv_part INTO lv_value SEPARATED BY gv_sep.
+      ENDIF.
+    ENDLOOP.
+
+    CLEAR gs_lookup.
+    gs_lookup-lookup_key = lv_key.
+    gs_lookup-lookup_val = lv_value.
+    APPEND gs_lookup TO gt_lookup.
+
+  ENDLOOP.
+
+ENDFORM.
+
