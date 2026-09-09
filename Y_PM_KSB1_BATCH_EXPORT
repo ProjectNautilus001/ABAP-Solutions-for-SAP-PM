@@ -1,0 +1,442 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_KSB1_BATCH_EXPORT
+*&---------------------------------------------------------------------*
+*& Führt die KSB1 mit wählbarer Variante aus und exportiert als *.txt
+*& wahlweise auf das Frontend oder auf den Applikationsserver.
+*&
+*& Frontend:
+*& - Dateiauswahl über den Dialog "Speichern unter"
+*& - Dateiausgabe über GUI_DOWNLOAD
+*&
+*& Applikationsserver / Batch:
+*& - Verzeichnis und Dateiname werden getrennt angegeben
+*& - Dateiausgabe über OPEN DATASET
+*&
+*& Author     : Student, Christian
+*& date       : 30.04.2026
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool ( )
+*&
+*----------------------------------------------------------------------*
+* Aenderungshistorie
+* Datum      Benutzer:                  Grund
+* 05.05.26   Student           Selektion Dateiname hinzugefügt
+* 21.08.26   Student           Funktionsumfang an KOB1-Export angepasst
+*                              Frontend-/Backend-Verzeichnisfeld
+*                              Speichern-unter-Dialog für Frontend
+* 01.09.26   Student           Reportvariante wird beim Start abgefragt.
+*----------------------------------------------------------------------*
+
+REPORT y_pm_ksb1_batch_export NO STANDARD PAGE HEADING.
+
+
+SELECTION-SCREEN BEGIN OF BLOCK b01 WITH FRAME TITLE gv_title.
+
+PARAMETERS:
+  p_var   TYPE raldb_vari DEFAULT ' ' OBLIGATORY,
+  p_front RADIOBUTTON GROUP g01 DEFAULT 'X' USER-COMMAND mode,
+  p_batch RADIOBUTTON GROUP g01,
+  p_ffile TYPE string LOWER CASE MODIF ID frt,
+  p_adir  TYPE string LOWER CASE MODIF ID bat,
+  p_file  TYPE string DEFAULT 'SAP ILV N23 KSB1 2026.txt'
+                 LOWER CASE MODIF ID bat.
+
+SELECTION-SCREEN END OF BLOCK b01.
+
+TYPES:
+  ty_ascii_line TYPE c LENGTH 1024.
+
+DATA:
+  gt_listobject TYPE STANDARD TABLE OF abaplist,
+  gt_asci       TYPE STANDARD TABLE OF ty_ascii_line,
+  gv_file       TYPE string,
+  gv_line       TYPE ty_ascii_line,
+  gv_header     TYPE ty_ascii_line,
+  gv_date_text  TYPE c LENGTH 10,
+  gv_time_text  TYPE c LENGTH 8,
+  gv_filename   TYPE string,
+  gv_path       TYPE string,
+  gv_fullpath   TYPE string,
+  gv_action     TYPE i.
+
+
+INITIALIZATION.
+  gv_title = 'Ausgabeart und Zielverzeichnis'.
+  p_adir = '\\10.32.192.12\XCHG\SAP\'.
+
+  " Variante automatisch beim Start abfragen
+  IF sy-batch IS INITIAL.
+    PERFORM ask_variant_name.
+  ENDIF.
+
+AT SELECTION-SCREEN OUTPUT.
+  LOOP AT SCREEN.
+    CASE screen-group1.
+      WHEN 'FRT'.
+        IF p_front = 'X'.
+          screen-active    = 1.
+          screen-input     = 1.
+          screen-output    = 1.
+          screen-invisible = 0.
+        ELSE.
+          screen-active    = 0.
+          screen-input     = 0.
+          screen-output    = 0.
+          screen-invisible = 1.
+        ENDIF.
+      WHEN 'BAT'.
+        IF p_batch = 'X'.
+          screen-active    = 1.
+          screen-input     = 1.
+          screen-output    = 1.
+          screen-invisible = 0.
+        ELSE.
+          screen-active    = 0.
+          screen-input     = 0.
+          screen-output    = 0.
+          screen-invisible = 1.
+        ENDIF.
+    ENDCASE.
+    MODIFY SCREEN.
+  ENDLOOP.
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_ffile.
+  IF sy-batch = 'X'.
+    MESSAGE 'Dateiauswahl ist im Hintergrund nicht möglich' TYPE 'E'.
+  ENDIF.
+
+  CLEAR:
+    gv_filename,
+    gv_path,
+    gv_fullpath,
+    gv_action.
+
+  CALL METHOD cl_gui_frontend_services=>file_save_dialog
+    EXPORTING
+      window_title          = 'KSB1-Export speichern unter'
+      default_extension     = 'txt'
+      default_file_name     = 'SAP ILV N23 KSB1 2026.txt'
+      file_filter           = 'Textdateien (*.txt)|*.txt|Alle Dateien (*.*)|*.*|'
+      prompt_on_overwrite   = 'X'
+    CHANGING
+      filename              = gv_filename
+      path                  = gv_path
+      fullpath              = gv_fullpath
+      user_action           = gv_action
+    EXCEPTIONS
+      cntl_error            = 1
+      error_no_gui          = 2
+      not_supported_by_gui  = 3
+      OTHERS                = 4.
+
+  IF sy-subrc <> 0.
+    MESSAGE 'Speichern-unter-Dialog konnte nicht geöffnet werden'
+            TYPE 'S' DISPLAY LIKE 'E'.
+  ELSEIF gv_action = cl_gui_frontend_services=>action_ok.
+    p_ffile = gv_fullpath.
+  ENDIF.
+
+AT SELECTION-SCREEN.
+  CHECK sy-ucomm = 'ONLI'
+     OR sy-ucomm = 'PRIN'
+     OR sy-ucomm = 'SJOB'.
+
+  IF p_front = 'X' AND p_ffile IS INITIAL.
+    MESSAGE 'Bitte über F4 eine Frontend-Zieldatei auswählen' TYPE 'E'.
+  ENDIF.
+
+  IF p_batch = 'X' AND p_adir IS INITIAL.
+    MESSAGE 'Bitte ein AL11-Zielverzeichnis angeben' TYPE 'E'.
+  ENDIF.
+
+  IF p_batch = 'X' AND p_file IS INITIAL.
+    MESSAGE 'Bitte einen Dateinamen für den Batch-Export angeben' TYPE 'E'.
+  ENDIF.
+
+START-OF-SELECTION.
+  IF p_front = 'X'.
+    gv_file = p_ffile.
+  ELSE.
+    PERFORM build_file USING p_adir '/' CHANGING gv_file.
+  ENDIF.
+
+  SUBMIT rkaep000
+    USING SELECTION-SET p_var
+    EXPORTING LIST TO MEMORY
+    AND RETURN.
+
+  CALL FUNCTION 'LIST_FROM_MEMORY'
+    TABLES
+      listobject = gt_listobject
+    EXCEPTIONS
+      OTHERS     = 1.
+
+  IF sy-subrc <> 0.
+    MESSAGE 'Computer sagt: Keine Liste aus RKAEP000 gelesen' TYPE 'E'.
+  ENDIF.
+
+  CALL FUNCTION 'LIST_TO_ASCI'
+    TABLES
+      listobject = gt_listobject
+      listasci   = gt_asci
+    EXCEPTIONS
+      OTHERS     = 1.
+
+  IF sy-subrc <> 0.
+    MESSAGE 'Computer sagt: Fehler bei LIST_TO_ASCI' TYPE 'E'.
+  ENDIF.
+
+  CONCATENATE sy-datum+6(2) '.' sy-datum+4(2) '.' sy-datum(4)
+         INTO gv_date_text.
+  CONCATENATE sy-uzeit(2) ':' sy-uzeit+2(2) ':' sy-uzeit+4(2)
+         INTO gv_time_text.
+
+  CONCATENATE
+    'Export wurde erstellt durch ABAP-Report'
+    sy-repid
+    'Variante'
+    p_var
+    'am'
+    gv_date_text
+    gv_time_text
+    INTO gv_header
+    SEPARATED BY space.
+
+  INSERT gv_header INTO gt_asci INDEX 1.
+
+  IF p_front = 'X'.
+    PERFORM download_frontend.
+  ELSE.
+    PERFORM download_server.
+  ENDIF.
+
+FORM ask_variant_name.
+  TYPES:
+    BEGIN OF ty_rsparam_255,
+      selname TYPE c LENGTH 8,
+      kind    TYPE c LENGTH 1,
+      sign    TYPE c LENGTH 1,
+      option  TYPE c LENGTH 2,
+      low     TYPE c LENGTH 255,
+      high    TYPE c LENGTH 255,
+    END OF ty_rsparam_255.
+
+  DATA:
+    lt_fields    TYPE STANDARD TABLE OF sval,
+    ls_field     TYPE sval,
+    lv_return    TYPE c LENGTH 1,
+    lv_valid     TYPE abap_bool,
+    lv_variant   TYPE raldb_vari,
+    lt_rsparams  TYPE STANDARD TABLE OF ty_rsparam_255,
+    ls_rsparams  TYPE ty_rsparam_255.
+
+  lv_valid = abap_false.
+
+  WHILE lv_valid = abap_false.
+    CLEAR: lt_fields, ls_field.
+    ls_field-tabname   = 'VARID'.
+    ls_field-fieldname = 'VARIANT'.
+    ls_field-fieldtext = 'Reportvariante'.
+    ls_field-field_obl = 'X'.
+    ls_field-value     = p_var.          " aktuellen Default vorschlagen
+    APPEND ls_field TO lt_fields.
+
+    CALL FUNCTION 'POPUP_GET_VALUES'
+      EXPORTING
+        popup_title = 'Variante für KSB1-Export eingeben'
+      IMPORTING
+        returncode  = lv_return
+      TABLES
+        fields      = lt_fields
+      EXCEPTIONS
+        error_in_fields = 1
+        OTHERS          = 2.
+
+    IF lv_return = 'A' OR sy-subrc <> 0.
+      " Abbruch durch den User, Schleife verlassen, bisheriger
+      " Wert von p_var (Default bzw. Batch-Vorbelegung) bleibt stehen.
+      EXIT.
+    ENDIF.
+
+    READ TABLE lt_fields INTO ls_field INDEX 1.
+    CHECK sy-subrc = 0.
+
+    lv_variant = ls_field-value.
+    TRANSLATE lv_variant TO UPPER CASE.
+
+    " Kompletten Varianteninhalt lesen
+    REFRESH lt_rsparams.
+    CALL FUNCTION 'RS_VARIANT_CONTENTS_255'
+      EXPORTING
+        report                = sy-repid
+        variant               = lv_variant
+      TABLES
+        valutab               = lt_rsparams
+      EXCEPTIONS
+        variant_non_existent  = 1
+        variant_obj_not_found = 2
+        OTHERS                = 3.
+
+    IF sy-subrc <> 0.
+      MESSAGE 'Variante existiert nicht' TYPE 'I'.
+    ELSE.
+      lv_valid = abap_true.
+
+      " Gespeicherte Feldwerte der Variante auf die Selektionsfelder
+      " des Reports übertragen, inkl. P_VAR selbst, da dessen Wert
+      " (die zugehörige RKAEP000-Selektion) Teil der Variante ist
+      " und nicht zwingend mit dem Variantennamen identisch sein muss!
+      LOOP AT lt_rsparams INTO ls_rsparams.
+        CASE ls_rsparams-selname.
+          WHEN 'P_VAR'.
+            p_var = ls_rsparams-low.
+            CONDENSE p_var.
+          WHEN 'P_FRONT'.
+            p_front = ls_rsparams-low.
+          WHEN 'P_BATCH'.
+            p_batch = ls_rsparams-low.
+          WHEN 'P_FFILE'.
+            p_ffile = ls_rsparams-low.
+            CONDENSE p_ffile.
+          WHEN 'P_ADIR'.
+            p_adir = ls_rsparams-low.
+            CONDENSE p_adir.
+          WHEN 'P_FILE'.
+            p_file = ls_rsparams-low.
+            CONDENSE p_file.
+        ENDCASE.
+      ENDLOOP.
+
+      " Falls die Variante keinen eigenen Wert für
+      " P_VAR gespeichert hat, eingegebenen
+      " Variantennamen als Fallback verwenden.
+      IF p_var IS INITIAL.
+        p_var = lv_variant.
+      ENDIF.
+    ENDIF.
+  ENDWHILE.
+ENDFORM.
+
+FORM build_file USING    iv_directory TYPE string
+                         iv_separator TYPE c
+                CHANGING cv_file      TYPE string.
+  DATA:
+    lv_directory TYPE string,
+    lv_length    TYPE i,
+    lv_offset    TYPE i,
+    lv_last      TYPE c LENGTH 1.
+
+  lv_directory = iv_directory.
+  lv_length = strlen( lv_directory ).
+
+  IF lv_length > 0.
+    lv_offset = lv_length - 1.
+    lv_last = lv_directory+lv_offset(1).
+
+    IF lv_last <> '/' AND lv_last <> '\'.
+      CONCATENATE lv_directory iv_separator INTO lv_directory.
+    ENDIF.
+  ENDIF.
+
+  CONCATENATE lv_directory p_file INTO cv_file.
+ENDFORM.
+
+FORM download_frontend.
+  DATA:
+    lv_string  TYPE string,
+    lv_xstring TYPE xstring,
+    lv_len     TYPE i,
+    lt_bin     TYPE STANDARD TABLE OF solix,
+    lo_conv    TYPE REF TO cl_abap_conv_out_ce.
+
+
+  LOOP AT gt_asci INTO gv_line.
+    IF lv_string IS INITIAL.
+      lv_string = gv_line.
+    ELSE.
+      CONCATENATE lv_string gv_line
+             INTO lv_string
+             SEPARATED BY cl_abap_char_utilities=>cr_lf.
+    ENDIF.
+  ENDLOOP.
+
+  " --- Nach UTF-8 konvertieren ---
+  lo_conv = cl_abap_conv_out_ce=>create( encoding = 'UTF-8' ).
+  lo_conv->write( data = lv_string ).
+  lv_xstring = lo_conv->get_buffer( ).
+
+
+  CONCATENATE cl_abap_char_utilities=>byte_order_mark_utf8 lv_xstring
+         INTO lv_xstring IN BYTE MODE.
+
+  CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+    EXPORTING
+      buffer        = lv_xstring
+    IMPORTING
+      output_length = lv_len
+    TABLES
+      binary_tab    = lt_bin.
+
+
+  CALL METHOD cl_gui_cfw=>flush.
+
+
+  CALL METHOD cl_gui_frontend_services=>gui_download
+    EXPORTING
+      filename                 = gv_file
+      filetype                 = 'BIN'
+      bin_filesize             = lv_len
+    CHANGING
+      data_tab                 = lt_bin
+    EXCEPTIONS
+      file_write_error         = 1
+      no_batch                 = 2
+      gui_refuse_filetransfer  = 3
+      invalid_type             = 4
+      no_authority             = 5
+      unknown_error             = 6
+      header_not_allowed       = 7
+      separator_not_allowed    = 8
+      filesize_not_allowed     = 9
+      header_too_long          = 10
+      dp_error_create          = 11
+      dp_error_send            = 12
+      dp_error_write           = 13
+      unknown_dp_error         = 14
+      access_denied            = 15
+      dp_out_of_memory         = 16
+      disk_full                = 17
+      dp_timeout               = 18
+      file_not_found           = 19
+      dataprovider_exception   = 20
+      control_flush_error      = 21
+      not_supported_by_gui     = 22
+      error_no_gui             = 23
+      OTHERS                   = 24.
+
+  IF sy-subrc <> 0.
+    MESSAGE 'Computer sagt: Frontend-Datei konnte nicht geschrieben werden'
+            TYPE 'E'.
+  ENDIF.
+
+  MESSAGE 'Computer sagt: KSB1-Frontend-Export hat hingehauen' TYPE 'S'.
+ENDFORM.
+
+FORM download_server.
+  OPEN DATASET gv_file FOR OUTPUT IN TEXT MODE ENCODING UTF-8
+
+    WITH BYTE-ORDER MARK.
+
+  IF sy-subrc <> 0.
+    MESSAGE 'Computer sagt: AL11-Zieldatei konnte nicht geöffnet werden'
+            TYPE 'E'.
+  ENDIF.
+
+  LOOP AT gt_asci INTO gv_line.
+    TRANSFER gv_line TO gv_file.
+  ENDLOOP.
+
+  CLOSE DATASET gv_file.
+
+  MESSAGE 'Computer sagt: KSB1-Batch-Export hat hingehauen' TYPE 'S'.
+ENDFORM.
