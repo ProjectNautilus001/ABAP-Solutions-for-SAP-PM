@@ -1,0 +1,144 @@
+*&---------------------------------------------------------------------*
+*& Report Y_PM_AUFK_EXP
+*&---------------------------------------------------------------------*
+*& Exportiert AUFK + CSKT
+*&---------------------------------------------------------------------*
+*& Author     : Student, Christian
+*& date       : 03.08.2026
+*& kind of p. : Report    (x)     Batch-Input ( )      Include   ( )
+*&              Sonstiges/others  ( )                  Modulpool   ( )
+*&
+*&----------------------------------------------------------------------*
+*& Änderungshistorie                                                    *
+*& Datum      Benutzer:                  Grund                          *
+*& ---------- ----------------- --------------------------------------- *
+*& 07.08.2026 -                 Batchfaehig gemacht:                    *
+*&                               - Ausgabe erfolgt jetzt per OPEN       *
+*&                                 DATASET auf den Applikationsserver   *
+*&                               - Fehlerbehandlung fuer OPEN/CLOSE     *
+*&                                 DATASET ergaenzt                     *
+*&----------------------------------------------------------------------*
+
+REPORT y_pm_aufk_exp.
+
+TABLES: aufk,
+        cskt.
+
+TYPES: BEGIN OF ty_out,
+         aufnr      TYPE aufk-aufnr,
+         erdat      TYPE aufk-erdat,
+         ktext      TYPE aufk-ktext,
+         bukrs      TYPE aufk-bukrs,
+         kostv      TYPE aufk-kostv,
+         phas1      TYPE aufk-phas1,
+         cycle      TYPE aufk-cycle,
+         csks_ltext TYPE cskt-ltext,
+       END OF ty_out.
+
+DATA: gt_out TYPE STANDARD TABLE OF ty_out,
+      gs_out TYPE ty_out.
+
+DATA: gt_file  TYPE TABLE OF string,
+      gv_line  TYPE string,
+      lv_ltext TYPE cskt-ltext,
+      lv_kostl TYPE cskt-kostl.
+
+
+PARAMETERS:
+  p_file TYPE string OBLIGATORY DEFAULT '/tmp/aufk_export.txt'.
+
+SELECT-OPTIONS:
+  s_cycle FOR aufk-cycle.
+
+START-OF-SELECTION.
+
+  SELECT aufnr
+         erdat
+         ktext
+         bukrs
+         kostv
+         phas1
+         cycle
+    INTO CORRESPONDING FIELDS OF TABLE gt_out
+    FROM aufk
+   WHERE phas1 = 'X'
+     AND cycle IN s_cycle.
+
+  IF gt_out IS INITIAL.
+    MESSAGE 'Keine Daten zum Selektionskriterium gefunden.' TYPE 'I'.
+  ENDIF.
+
+
+  LOOP AT gt_out INTO gs_out.
+
+    CLEAR: lv_ltext,
+           lv_kostl.
+
+    lv_kostl = gs_out-cycle.
+
+    SELECT SINGLE ltext
+      INTO lv_ltext
+      FROM cskt
+     WHERE kostl = lv_kostl
+       AND spras = sy-langu.
+
+    gs_out-csks_ltext = lv_ltext.
+
+    MODIFY gt_out FROM gs_out INDEX sy-tabix.
+
+  ENDLOOP.
+
+* Kopfzeile aufbauen
+  CLEAR gv_line.
+  CONCATENATE 'Auftrag'
+              'Erfassungsdatum'
+              'Auftragskurztext'
+              'Buchungskreis'
+              'verantwortliche Kostenstelle'
+              'Freigabe'
+              'bebuchte Kostenstelle'
+              'Kostenstellenbezeichnung'
+         INTO gv_line
+    SEPARATED BY '|'.
+
+  APPEND gv_line TO gt_file.
+
+* Datenzeilen aufbauen
+  LOOP AT gt_out INTO gs_out.
+
+    CLEAR gv_line.
+
+    CONCATENATE gs_out-aufnr
+                gs_out-erdat
+                gs_out-ktext
+                gs_out-bukrs
+                gs_out-kostv
+                gs_out-phas1
+                gs_out-cycle
+                gs_out-csks_ltext
+           INTO gv_line
+      SEPARATED BY '|'.
+
+    APPEND gv_line TO gt_file.
+
+  ENDLOOP.
+
+  OPEN DATASET p_file FOR OUTPUT IN TEXT MODE ENCODING DEFAULT.
+
+  IF sy-subrc <> 0.
+    MESSAGE 'Datei konnte nicht geoeffnet werden: ' && p_file TYPE 'E'.
+  ELSE.
+
+    LOOP AT gt_file INTO gv_line.
+      TRANSFER gv_line TO p_file.
+    ENDLOOP.
+
+    CLOSE DATASET p_file.
+
+    IF sy-batch = abap_true.
+      WRITE: / 'Export erfolgreich (Batch-Job):', p_file.
+    ELSE.
+      MESSAGE 'Export erfolgreich abgeschlossen.' TYPE 'S'.
+    ENDIF.
+
+  ENDIF.
